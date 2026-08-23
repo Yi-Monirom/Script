@@ -1,0 +1,288 @@
+---
+# =========================================================================
+# Configure USG6000V2 firewalls as a full active/standby HA pair.
+#
+# Runs on localhost and drives the expect script `usg.exp --config`.
+#
+# DESIGN NOTE (USG constraint): each firewall SINGLE-HOMES per purpose.
+# USG rejects the same IP on two sub-interfaces, so the crossed GE1/0/0
+# cables stay plugged but are UNCONFIGURED spare/backup paths. Redundancy
+# comes from the HA pair + the core-switch L2 ring (Po1):
+#
+#   Primary  (active):  GE1/0/1 (untrust) -> SW1, GE1/0/4 (trust) -> CS1
+#   Secondary(standby): GE1/0/1 (untrust) -> SW2, GE1/0/4 (trust) -> CS2
+#
+# Full config (sub-interfaces, zones, OSPF, policies, heartbeat) is applied
+# on the ACTIVE firewall and mirrored to STANDBY via HRP. The standby only
+# needs its heartbeat link + HRP enabled locally.
+#
+# Order matters for HRP:
+#   1. ACTIVE  gets full config (sub-interfaces, zones, OSPF, policies,
+#      heartbeat link) but HRP is NOT enabled yet.
+#   2. STANDBY gets sysname, heartbeat link, HRP interface + hrp enable.
+#   3. ACTIVE  gets hrp enable last -> negotiation -> sync to standby.
+#
+# The management interface / SSH (vty+aaa) are already configured manually
+# and are intentionally NOT touched here.
+#
+# Usage:
+#   ansible-playbook -i Inventory/Connection.ini playbooks/usg_firewall_playbook.yml
+# =========================================================================
+
+- name: Configure USG6000V2 Full HA (active/standby)
+  hosts: usg
+  gather_facts: false
+  connection: local
+  vars:
+    usg_exp: "{{ playbook_dir }}/../usg.exp"
+    active_host: "{{ groups['usg'] | map('extract', hostvars) | selectattr('usg_role', 'equalto', 'active') | map(attribute='inventory_hostname') | first }}"
+    standby_host: "{{ groups['usg'] | difference([active_host]) | first }}"
+    # One-time bootstrap for the STANDBY. Set to true only for the FIRST
+    # deployment; afterwards the standby is in HRP standby state and rejects
+    # local config changes (config now flows from active via HRP mirror).
+    bootstrap_standby: false
+
+    # NOTE: no '#' comments allowed inside these command strings — usg.exp
+    # sends every non-empty line to the firewall CLI verbatim.
+    #
+    # active_main_cmds notes:
+    #   - `dhcp enable` must precede `dhcp select interface` on GE1/0/4.100
+    #     (VLAN 100 Admin pool: 192.168.10.0/24, GW 192.168.10.1, DNS 8.8.8.8).
+    #   - `undo ospf mtu-enable` on the untrust sub-interfaces prevents OSPF
+    #     peers sticking in ExStart (USG advertises MTU 0 vs Cisco 1500).
+    #   - static default route via ISP-1 is the safety net for the default
+    #     route that OSPF should install from the ISPs' ASE LSA.
+    active_main_cmds: |-
+      sysname {{ hostvars[active_host].usg_sysname }}
+      interface {{ hostvars[active_host].hrp_interface }}
+       ip address {{ hostvars[active_host].hrp_local_ip }} {{ hostvars[active_host].hrp_netmask }}
+       undo shutdown
+       quit
+      firewall zone dmz
+       add interface {{ hostvars[active_host].hrp_interface }}
+       quit
+      hrp interface {{ hostvars[active_host].hrp_interface }} remote {{ hostvars[active_host].hrp_remote_ip }}
+      hrp mirror config enable
+      dhcp enable
+      # Clean up any orphaned spare-path sub-interface left over from the
+      # earlier duplicate-IP test. GE1/0/0 is the crossed backup cable to
+      # CSW2 and must stay a bare route port (no sub-interfaces), otherwise
+      # the two un-stacked core switches would form an L2 loop.
+      undo interface GigabitEthernet1/0/0.100
+      interface GigabitEthernet1/0/1.10
+       vlan-type dot1q 10
+       undo ip address
+       ip address 10.1.1.2 255.255.255.0
+       undo ospf mtu-enable
+       undo shutdown
+       quit
+      interface GigabitEthernet1/0/1.20
+       vlan-type dot1q 20
+       undo ip address
+       ip address 20.1.1.2 255.255.255.0
+       undo ospf mtu-enable
+       undo shutdown
+       quit
+      interface GigabitEthernet1/0/4.100
+       vlan-type dot1q 100
+       undo ip address
+       ip address 192.168.10.1 255.255.255.0
+       dhcp select interface
+       dhcp server dns-list 8.8.8.8
+       dhcp server lease day 1
+       undo shutdown
+       quit
+      interface GigabitEthernet1/0/4.200
+       vlan-type dot1q 200
+       undo ip address
+       ip address 192.168.20.1 255.255.255.0
+       undo shutdown
+       quit
+      interface GigabitEthernet1/0/4.300
+       vlan-type dot1q 300
+       undo ip address
+       ip address 192.168.30.1 255.255.255.0
+       undo shutdown
+       quit
+      firewall zone untrust
+       add interface GigabitEthernet1/0/1.10
+       add interface GigabitEthernet1/0/1.20
+       quit
+      firewall zone trust
+       add interface GigabitEthernet1/0/4.100
+       add interface GigabitEthernet1/0/4.200
+       quit
+      firewall zone dmz
+       add interface GigabitEthernet1/0/4.300
+       quit
+      ospf 1
+       area 0.0.0.0
+        network 10.1.1.0 0.0.0.255
+        network 20.1.1.0 0.0.0.255
+        network 192.168.10.0 0.0.0.255
+        network 192.168.20.0 0.0.0.255
+        network 192.168.30.0 0.0.0.255
+        quit
+       quit
+      ip route-static 0.0.0.0 0.0.0.0 10.1.1.1
+      ip route-static 0.0.0.0 0.0.0.0 20.1.1.1
+      security-policy
+       rule name Trust_to_Local
+        source-zone trust
+        destination-zone local
+        action permit
+       quit
+       rule name Trust_to_Untrust
+        source-zone trust
+        destination-zone untrust
+        action permit
+       quit
+       rule name Untrust_to_Trust
+        source-zone untrust
+        destination-zone trust
+        action permit
+       quit
+       rule name Trust_to_DMZ
+        source-zone trust
+        destination-zone dmz
+        action permit
+       quit
+       rule name Untrust_to_DMZ
+        source-zone untrust
+        destination-zone dmz
+        action permit
+       quit
+       rule name DMZ_to_Untrust
+        source-zone dmz
+        destination-zone untrust
+        action permit
+       quit
+      quit
+
+    active_hrp_cmds: |-
+      hrp enable
+
+    standby_cmds: |-
+      sysname {{ hostvars[standby_host].usg_sysname }}
+      interface {{ hostvars[standby_host].hrp_interface }}
+       ip address {{ hostvars[standby_host].hrp_local_ip }} {{ hostvars[standby_host].hrp_netmask }}
+       undo shutdown
+       quit
+      firewall zone dmz
+       add interface {{ hostvars[standby_host].hrp_interface }}
+       quit
+      hrp interface {{ hostvars[standby_host].hrp_interface }} remote {{ hostvars[standby_host].hrp_remote_ip }}
+      hrp enable
+      hrp switch standby
+
+  tasks:
+    # Push full L3 config (sub-interfaces, zones, OSPF, policies, heartbeat) to
+    # the ACTIVE firewall. HRP is NOT enabled yet — we apply the config first,
+    # then enable HRP so the standby mirrors a complete config.
+    - name: Push full config to ACTIVE firewall
+      ansible.builtin.shell: "{{ usg_exp }} --config"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+        USG_CMDS: "{{ active_main_cmds }}"
+      register: active_main_result
+      changed_when: true
+      run_once: true
+
+    # Show the raw output from the ACTIVE config push for debugging
+    - name: Show ACTIVE config output
+      ansible.builtin.debug:
+        var: active_main_result.stdout_lines
+      run_once: true
+
+    # Bootstraps the STANDBY firewall with its sysname, heartbeat IP, and
+    # HRP channel. This is a one-time step (guarded by `bootstrap_standby`).
+    # After the first run the standby is in HRP standby state and rejects
+    # local config changes — all config flows from the active via HRP mirror.
+    - name: Push heartbeat + HRP to STANDBY firewall
+      ansible.builtin.shell: "{{ usg_exp }} --config"
+      environment:
+        USG_HOST: "{{ hostvars[standby_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[standby_host].usg_password }}"
+        USG_CMDS: "{{ standby_cmds }}"
+      register: standby_result
+      changed_when: true
+      when: bootstrap_standby
+      run_once: true
+
+    - name: Show STANDBY config output
+      ansible.builtin.debug:
+        var: standby_result.stdout_lines
+      when: bootstrap_standby
+      run_once: true
+
+    - name: Enable HRP on ACTIVE firewall (final step)
+      ansible.builtin.shell: "{{ usg_exp }} --config"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+        USG_CMDS: "{{ active_hrp_cmds }}"
+      register: active_hrp_result
+      changed_when: true
+      run_once: true
+
+    - name: Show ACTIVE HRP enable output
+      ansible.builtin.debug:
+        var: active_hrp_result.stdout_lines
+      run_once: true
+
+    - name: Verify HRP state on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display hrp state"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: hrp_state
+      changed_when: false
+      run_once: true
+
+    - name: Show HRP state
+      ansible.builtin.debug:
+        var: hrp_state.stdout_lines
+      run_once: true
+
+    - name: Verify HRP state on STANDBY
+      ansible.builtin.shell: "{{ usg_exp }} display hrp state"
+      environment:
+        USG_HOST: "{{ hostvars[standby_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[standby_host].usg_password }}"
+      register: hrp_state_stdby
+      changed_when: false
+      run_once: true
+
+    - name: Show STANDBY HRP state
+      ansible.builtin.debug:
+        var: hrp_state_stdby.stdout_lines
+      run_once: true
+
+    - name: Verify OSPF neighbors on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ospf peer"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ospf_peer
+      changed_when: false
+      run_once: true
+
+    - name: Show OSPF peers
+      ansible.builtin.debug:
+        var: ospf_peer.stdout_lines
+      run_once: true
+
+    - name: Verify DHCP pool for VLAN 100 on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ip pool interface GigabitEthernet1/0/4.100 used"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: dhcp_pool
+      changed_when: false
+      run_once: true
+
+    - name: Show DHCP pool status
+      ansible.builtin.debug:
+        var: dhcp_pool.stdout_lines
+      run_once: true

@@ -1,0 +1,91 @@
+---
+- name: Configure L2 Edge Switches (VLANs, trunks, EtherChannel)
+  hosts: switches
+  gather_facts: no
+  connection: network_cli
+
+  tasks:
+    - name: Set hostname
+      ios_config:
+        lines:
+          - hostname {{ hostname }} 
+    - name: Create VLANs
+      cisco.ios.ios_vlans:
+        config:
+          - vlan_id: "{{ item.id }}"
+            name: "{{ item.name }}"
+        state: merged
+      loop: "{{ l2_vlans }}"
+
+    - name: Configure access ports
+      ios_config:
+        lines:
+          - description {{ item.description }}
+          - switchport mode access
+          - switchport access vlan {{ item.vlan }}
+          - no shutdown
+        parents: interface {{ item.name }}
+      loop: "{{ access_ports | default([]) }}"
+      when: access_ports is defined
+
+    - name: Configure EtherChannel trunk (Port-channel)
+      ios_config:
+        lines:
+          - description EtherChannel_Redundancy
+          - switchport
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ port_channel_allowed_vlans }}
+          - no shutdown
+        parents: interface Port-channel{{ port_channel_id }}
+      when: port_channel_allowed_vlans is defined
+
+    - name: Add member ports to EtherChannel
+      ios_config:
+        lines:
+          - description {{ item.description }}
+          - switchport
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - channel-group {{ port_channel_id }} mode active
+          - no shutdown
+        parents: interface {{ item.name }}
+      loop: "{{ etherchannel_members }}"
+
+    - name: Configure trunk ports to firewalls / LAN
+      ios_config:
+        lines:
+          - description {{ item.description }}
+          - switchport
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ item.allowed_vlans }}
+          - no shutdown
+        parents: interface {{ item.name }}
+      loop: "{{ edge_trunk_ports }}"
+
+    - name: Configure LAN-facing trunk ports (core switches)
+      ios_config:
+        lines:
+          - description {{ item.description }}
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ item.allowed_vlans }}
+          - no shutdown
+        parents: interface {{ item.name }}
+      loop: "{{ lan_ports | default([]) }}"
+      when: lan_ports is defined
+
+    - name: Save running configuration to startup
+      ios_config:
+        save_when: modified
+
+    - name: Verify EtherChannel status
+      ios_command:
+        commands:
+          - show etherchannel summary
+      register: etherchannel_status
+
+    - name: Display EtherChannel summary
+      debug:
+        var: etherchannel_status.stdout_lines
