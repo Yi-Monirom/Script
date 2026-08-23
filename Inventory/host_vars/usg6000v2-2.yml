@@ -1,0 +1,11 @@
+---
+# Secondary USG firewall (standby/HRP slave) host variables
+usg_role: standby
+usg_sysname: USG6000V2-Standby
+usg_mgmt_ip: 192.168.71.101
+
+# HA heartbeat (G1/0/3) - dedicated cable to Primary
+hrp_interface: GigabitEthernet1/0/3
+hrp_local_ip: 172.16.0.2
+hrp_remote_ip: 172.16.0.1
+hrp_netmask: 255.255.255.252

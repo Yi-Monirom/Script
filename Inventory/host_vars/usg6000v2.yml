@@ -1,0 +1,29 @@
+---
+# Primary USG firewall (active/HRP master) host variables
+usg_role: active
+usg_sysname: USG6000V2-Primary
+usg_mgmt_ip: 192.168.71.100
+
+# HA heartbeat (G1/0/3) - dedicated cable to Secondary
+hrp_interface: GigabitEthernet1/0/3
+hrp_local_ip: 172.16.0.1
+hrp_remote_ip: 172.16.0.2
+hrp_netmask: 255.255.255.252
+
+# UNTRUST sub-interfaces toward ISP (GE1/0/1 -> SW1, GE1/0/2 -> SW2)
+untrust_ports: [GigabitEthernet1/0/1, GigabitEthernet1/0/2]
+# TRUST sub-interfaces toward LAN (GE1/0/4 -> CS1, GE1/0/0 -> CS2)
+trust_ports: [GigabitEthernet1/0/4, GigabitEthernet1/0/0]
+
+untrust_gw: 10.1.1.1
+inside_gw: 192.168.10.1
+
+l3_vlans:
+  - { id: 10, ip: 10.1.1.2, netmask: 255.255.255.0 }
+  - { id: 20, ip: 20.1.1.2, netmask: 255.255.255.0 }
+  - { id: 100, ip: 192.168.10.1, netmask: 255.255.255.0 }
+
+ospf_networks:
+  - { network: 10.1.1.0, wildcard: 0.0.0.255 }
+  - { network: 20.1.1.0, wildcard: 0.0.0.255 }
+  - { network: 192.168.10.0, wildcard: 0.0.0.255 }

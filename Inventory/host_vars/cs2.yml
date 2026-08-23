@@ -1,0 +1,38 @@
+---
+# Core_Switch2 (L2) host variables
+hostname: Core_Switch2
+
+l2_vlans:
+  - { id: 100, name: ADMIN }
+  - { id: 200, name: STAFF }
+  - { id: 300, name: DMZ-SERVER }
+
+port_channel_id: 1
+port_channel_allowed_vlans: "100,200,300"
+
+edge_trunk_ports:
+  - name: GigabitEthernet0/0
+    description: Link_to_Secondary_FW
+    allowed_vlans: "100,200,300"
+  - name: GigabitEthernet0/3
+    description: Link_to_Primary_FW
+    allowed_vlans: "100,200,300"
+  - name : GigabitEthernet1/0
+    description: Link_to_Access_Switch1
+    allowed_vlans: "100"
+  - name : GigabitEthernet1/1
+    description: Link_to_Access_Switch2
+    allowed_vlans: "200"
+  - name : GigabitEthernet1/2
+    description: Link_to_Access_Switch3
+    allowed_vlans: "300"
+
+etherchannel_members:
+  - name: GigabitEthernet0/1
+    description: Redundancy_link_1
+  - name: GigabitEthernet0/2
+    description: Redundancy_link_2
+
+
+
+

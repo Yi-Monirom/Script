@@ -1,0 +1,35 @@
+---
+# Edge_Switch1 (L2) host variables
+hostname: Edge_Switch1
+
+# Gi0/0 -> ISP-1 (access VLAN 10)
+# Gi0/1 + Gi0/2 -> LACP EtherChannel (Port-channel1) to Edge_Switch2
+# Gi0/3 -> Secondary firewall (trunk)
+# Gi1/0 -> Primary firewall (trunk)
+
+l2_vlans:
+  - { id: 10, name: UNTRUST-ISP1 }
+  - { id: 20, name: UNTRUST-ISP2 }
+
+access_ports:
+  - name: GigabitEthernet0/0
+    description: Uplink_to_ISP1
+    vlan: 10
+
+port_channel_id: 1
+
+port_channel_allowed_vlans: "10,20"
+
+edge_trunk_ports:
+  - name: GigabitEthernet0/3
+    description: Link_to_Secondary_FW
+    allowed_vlans: "10,20"
+  - name: GigabitEthernet1/0
+    description: Link_to_Primary_FW
+    allowed_vlans: "10,20"
+
+etherchannel_members:
+  - name: GigabitEthernet0/1
+    description: Redundancy_link_1
+  - name: GigabitEthernet0/2
+    description: Redundancy_link_2
