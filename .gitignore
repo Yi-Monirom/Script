@@ -6,7 +6,8 @@ __pycache__/
 
 # Ansible
 *.retry
-Inventory/group_vars/
+Inventory/group_vars/switches.yml
+Inventory/group_vars/usg.yml
 playbooks/edge_switches_playbook.yml
 
 # Local runtime files
