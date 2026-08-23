@@ -8,7 +8,7 @@ __pycache__/
 *.retry
 Inventory/group_vars/
 Inventory/host_vars/
-
+playbooks/edge_switches_playbook.yml
 # Local runtime files
 *.log
 *.tmp
