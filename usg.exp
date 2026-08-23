@@ -1,0 +1,171 @@
+#!/usr/bin/expect -f
+
+# =========================================================
+# usg.exp - run commands on a Huawei USG6000V2 via SSH
+#
+# Usage:
+#   ./usg.exp [command]                 # run one user-view command
+#   ./usg.exp --config                  # apply config commands from USG_CMDS
+#   ./usg.exp --save                    # just save the running config
+#
+# Environment:
+#   USG_HOST   (default 192.168.71.100)
+#   USG_PORT   (default 22)
+#   USG_USER   (default admin)
+#   USG_PASS   (default M@n!r0m@123)
+#   USG_TIMEOUT(default 30)
+#   USG_CMDS   (newline-separated config commands for --config mode)
+#
+# Prompts are matched with regexes so a changed sysname does not break
+# the session. Paging is disabled with `screen-length 0 temporary`.
+# =========================================================
+
+set timeout 30
+
+set host   [expr {[info exists env(USG_HOST)]   ? $env(USG_HOST)   : "192.168.71.100"}]
+set port   [expr {[info exists env(USG_PORT)]   ? $env(USG_PORT)   : "22"}]
+set user   [expr {[info exists env(USG_USER)]   ? $env(USG_USER)   : "admin"}]
+set pass   [expr {[info exists env(USG_PASS)]   ? $env(USG_PASS)   : "M@n!r0m@123"}]
+if {[info exists env(USG_TIMEOUT)]} {
+    set timeout $env(USG_TIMEOUT)
+}
+
+# user-view prompt:  <USG6000V2> or <USG6000V2-Primary>
+# config-view prompt: [USG6000V2] or [USG6000V2-Primary-...]
+set user_prompt  {<USG6000V2[^>]*>}
+set conf_prompt  {\[USG6000V2[^\]]*\]}
+
+set mode "command"
+if {$argc > 0} {
+    if {$argv eq "--config"} {
+        set mode "config"
+    } elseif {$argv eq "--save"} {
+        set mode "save"
+    } else {
+        set command [join $argv " "]
+    }
+} else {
+    set command "display version"
+}
+
+proc fail {msg} {
+    puts stderr "ERROR: $msg"
+    exit 1
+}
+
+# ---- login ----
+spawn ssh -tt \
+    -o KexAlgorithms=+diffie-hellman-group14-sha1 \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -p $port -l $user $host
+
+expect {
+    -nocase -re "password:" {
+        send -- "$pass\r"
+        exp_continue
+    }
+    -re "$user_prompt" {
+        # logged in at the VRP user view
+    }
+    timeout { fail "login timeout after $timeout s" }
+    eof    { fail "connection closed during login" }
+}
+
+# ---- disable paging (ignore failures) ----
+send -- "screen-length 0 temporary\r"
+expect {
+    -re "$user_prompt" { }
+    timeout { fail "could not set screen-length" }
+    eof    { fail "connection closed while disabling paging" }
+}
+
+if {$mode eq "command"} {
+    # ---- run a single user-view command ----
+    send -- "$command\r"
+    expect {
+        -re "$user_prompt" {
+            set output $expect_out(buffer)
+        }
+        timeout { fail "command timed out after $timeout s: $command" }
+        eof    { fail "connection closed while waiting for command output" }
+    }
+    regsub -all -- "$command" $output "" output
+    regsub -all -- "\r" $output "" output
+    set output [string trim $output]
+    puts "\n===== COMMAND OUTPUT ($command) ====="
+    puts "$output"
+    puts "======================================"
+    send -- "quit\r"
+    expect eof
+    exit 0
+}
+
+if {$mode eq "save"} {
+    # ---- just save the running config ----
+    send -- "save\r"
+    expect {
+        -re {\[Y/N\]} {
+            send -- "y\r"
+            exp_continue
+        }
+        -re "$user_prompt" {
+            puts "\n===== CONFIGURATION SAVED ====="
+        }
+        timeout { fail "save timed out" }
+        eof    { fail "connection closed during save" }
+    }
+    send -- "quit\r"
+    expect eof
+    exit 0
+}
+
+# ---- config mode: apply commands from USG_CMDS ----
+if {![info exists env(USG_CMDS)] || $env(USG_CMDS) eq ""} {
+    fail "USG_CMDS not set (required for --config mode)"
+}
+set cmds [split $env(USG_CMDS) "\n"]
+
+send -- "system-view\r"
+expect {
+    -re "$conf_prompt" { }
+    timeout { fail "could not enter system view" }
+    eof    { fail "connection closed entering system view" }
+}
+
+foreach cmd $cmds {
+    set cmd [string trim $cmd]
+    if {$cmd eq ""} { continue }
+    send -- "$cmd\r"
+    expect {
+        -re "$conf_prompt" { }
+        timeout { fail "command timed out after $timeout s: $cmd" }
+        eof    { fail "connection closed during: $cmd" }
+    }
+}
+
+# back to user view
+send -- "quit\r"
+expect {
+    -re "$user_prompt" { }
+    timeout { fail "could not return to user view" }
+    eof    { fail "connection closed returning to user view" }
+}
+
+# save
+send -- "save\r"
+expect {
+    -re {\[Y/N\]} {
+        send -- "y\r"
+        exp_continue
+    }
+    -re "$user_prompt" {
+        puts "\n===== CONFIGURATION APPLIED AND SAVED ====="
+    }
+    timeout { fail "save timed out" }
+    eof    { fail "connection closed during save" }
+}
+
+send -- "quit\r"
+expect eof
+exit 0
