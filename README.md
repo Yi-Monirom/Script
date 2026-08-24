@@ -155,3 +155,5 @@ The management SSH configuration is expected to already exist and is not changed
 ## Safety
 
 These playbooks change live network devices. Review the inventory and host variables, verify the topology, and test against a lab device before applying changes to production equipment.
+
+Script/playbooks/l2_switches_playbook.yml
