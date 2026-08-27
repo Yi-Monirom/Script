@@ -138,6 +138,86 @@ foreach cmd $cmds {
     if {$cmd eq ""} { continue }
     send -- "$cmd\r"
     expect {
+        -nocase -re {Are you sure to continue\? \[Y/N\]:} {
+            send -- "y\r"
+            exp_continue
+        }
+        -re {country code.*:} {
+            send -- "US\r"
+            exp_continue
+        }
+        -re {state name.*:} {
+            send -- "California\r"
+            exp_continue
+        }
+        -re {locality name.*:} {
+            send -- "Sunnyvale\r"
+            exp_continue
+        }
+        -re {organization name.*:} {
+            send -- "Monirom\r"
+            exp_continue
+        }
+        -re {organization unit name.*:} {
+            send -- "IT\r"
+            exp_continue
+        }
+        -re {common name.*:} {
+            send -- "USG6000V2-Primary\r"
+            exp_continue
+        }
+        -re {date of certificate notBefore.*:} {
+            send -- "2026-08-25\r"
+            exp_continue
+        }
+        -re {time of certificate notBefore.*:} {
+            send -- "00:00:00\r"
+            exp_continue
+        }
+        -re {date of certificate notAfter.*:} {
+            send -- "2036-08-25\r"
+            exp_continue
+        }
+        -re {time of certificate notAfter.*:} {
+            send -- "00:00:00\r"
+            exp_continue
+        }
+        -re {key-pair name.*:} {
+            send -- "cert-key\r"
+            exp_continue
+        }
+        -nocase -re {private key will be saved.*:} {
+            send -- "local-cert.key\r"
+            exp_continue
+        }
+        -nocase -re {encrypt password.*:} {
+            send -- "M@n!r0m@123\r"
+            exp_continue
+        }
+        -nocase -re {RSA key modulus.*:} {
+            send -- "2048\r"
+            exp_continue
+        }
+        -nocase -re {CA certificate\? \[Y/N\]:} {
+            send -- "n\r"
+            exp_continue
+        }
+        -nocase -re {Are you sure to save the certificate\? \[Y/N\]:} {
+            send -- "y\r"
+            exp_continue
+        }
+        -nocase -re {already exists.*overwrite\? \[Y/N\]:} {
+            send -- "y\r"
+            exp_continue
+        }
+        -nocase -re {overwrite.*\[y/n\]:} {
+            send -- "y\r"
+            exp_continue
+        }
+        -nocase -re {\[Y/N\]:?} {
+            send -- "y\r"
+            exp_continue
+        }
         -re "$conf_prompt" { }
         timeout { fail "command timed out after $timeout s: $cmd" }
         eof    { fail "connection closed during: $cmd" }

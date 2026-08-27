@@ -9,6 +9,7 @@ __pycache__/
 Inventory/group_vars/switches.yml
 Inventory/group_vars/usg.yml
 playbooks/edge_switches_playbook.yml
+notes.md
 
 # Local runtime files
 *.log

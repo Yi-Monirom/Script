@@ -76,6 +76,11 @@
       loop: "{{ lan_ports | default([]) }}"
       when: lan_ports is defined
 
+    - name: Configure login protection
+      ios_config:
+        lines:
+          - login block-for 120 attempts 4 within 60
+
     - name: Save running configuration to startup
       ios_config:
         save_when: modified

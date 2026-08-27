@@ -8,8 +8,10 @@ from ansible.module_utils.basic import AnsibleModule
 # usg.exp is resolved from the invoking working directory (Ansible zips the
 # module, so __file__ points into a temp payload dir that is useless here).
 _CANDIDATES = (
-    "Scripts/usg.exp",
-    os.path.join(os.getcwd(), "Scripts", "usg.exp"),
+    "Script/usg.exp",
+    os.path.join(os.getcwd(), "Script", "usg.exp"),
+    os.path.join(os.getcwd(), "..", "usg.exp"),
+    "/home/monirom/Documents/Thesis_project/Infrastructure/Script/usg.exp",
 )
 DEFAULTS = {
     "usg_host": "192.168.71.100",

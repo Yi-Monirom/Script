@@ -64,10 +64,6 @@
       hrp interface {{ hostvars[active_host].hrp_interface }} remote {{ hostvars[active_host].hrp_remote_ip }}
       hrp mirror config enable
       dhcp enable
-      # Clean up any orphaned spare-path sub-interface left over from the
-      # earlier duplicate-IP test. GE1/0/0 is the crossed backup cable to
-      # CSW2 and must stay a bare route port (no sub-interfaces), otherwise
-      # the two un-stacked core switches would form an L2 loop.
       undo interface GigabitEthernet1/0/0.100
       interface GigabitEthernet1/0/1.10
        vlan-type dot1q 10
@@ -175,6 +171,83 @@
       hrp enable
       hrp switch standby
 
+     # =========================================================================
+     # IPsec site-to-site VPN (dual ISP, IKEv2, certificate auth)
+     #
+     #   Active/standby tunnels:
+     #     Tunnel 1 (primary):  10.1.1.2  <-> 10.1.1.3  (ISP1)
+     #     Tunnel 2 (backup):   20.1.1.2  <-> 20.1.1.3  (ISP2)
+     #
+     # Both tunnels expose the same remote LAN (30.30.30.0/28). The USG uses
+     # the higher-priority tunnel first; if it fails, the second takes over.
+     #
+     # NOTE: certificate generation (pki rsa + self-signed) is included here.
+     # After the first run, export the local cert from each USG and import the
+     # peer's cert on the other side manually. The peer cert is trusted via
+     # peer-id fqdn {{ ipsec_remote_cn }}.
+     # =========================================================================
+    ipsec_remote_subnet: 30.30.30.0 0.0.0.15
+    ipsec_remote_cn: Monirom-USG6000V
+    ipsec_isp1_peer_ip: 10.1.1.3
+    ipsec_isp2_peer_ip: 20.1.1.3
+    ipsec_local_cn: USG6000V2-Primary
+
+    active_ipsec_cmds: |-
+       ike proposal 1
+        encryption-algorithm aes-256
+        authentication-algorithm sha2-256
+        authentication-method rsa-signature
+        integrity-algorithm hmac-sha2-256
+        dh group14
+        sa duration 86400
+        quit
+       ike peer peer-vpn1
+        version 2
+        ike-proposal 1
+        remote-address {{ ipsec_isp1_peer_ip }}
+        remote-id-type fqdn
+        remote-id {{ ipsec_remote_cn }}
+        quit
+       ike peer peer-vpn2
+        version 2
+        ike-proposal 1
+        remote-address {{ ipsec_isp2_peer_ip }}
+        remote-id-type fqdn
+        remote-id {{ ipsec_remote_cn }}
+        quit
+       ipsec proposal prop-vpn
+        esp authentication-algorithm sha2-256
+        esp encryption-algorithm aes-256
+        quit
+       acl number 3000
+        rule 5 permit ip source 192.168.10.0 0.0.0.255 destination {{ ipsec_remote_subnet }}
+        rule 10 permit ip source 192.168.20.0 0.0.0.255 destination {{ ipsec_remote_subnet }}
+        rule 15 permit ip source 192.168.30.0 0.0.0.255 destination {{ ipsec_remote_subnet }}
+        rule 20 permit ip source {{ ipsec_remote_subnet }} destination 192.168.10.0 0.0.0.255
+        rule 25 permit ip source {{ ipsec_remote_subnet }} destination 192.168.20.0 0.0.0.255
+        rule 30 permit ip source {{ ipsec_remote_subnet }} destination 192.168.30.0 0.0.0.255
+        quit
+       ipsec policy policy-vpn1 1 isakmp
+        security acl 3000
+        ike-peer peer-vpn1
+        proposal prop-vpn
+        pfs dh-group14
+        quit
+       ipsec policy policy-vpn2 1 isakmp
+        security acl 3000
+        ike-peer peer-vpn2
+        proposal prop-vpn
+        pfs dh-group14
+        quit
+       interface GigabitEthernet1/0/1.10
+        ipsec policy policy-vpn1
+        quit
+       interface GigabitEthernet1/0/1.20
+        ipsec policy policy-vpn2
+        quit
+       pki rsa local-key-pair create cert-key modulus 2048 exportable
+       pki create-certificate self-signed filename local-cert
+
   tasks:
     # Push full L3 config (sub-interfaces, zones, OSPF, policies, heartbeat) to
     # the ACTIVE firewall. HRP is NOT enabled yet — we apply the config first,
@@ -189,7 +262,22 @@
       changed_when: true
       run_once: true
 
-    # Show the raw output from the ACTIVE config push for debugging
+    - name: Push IPsec VPN config to ACTIVE firewall
+      ansible.builtin.shell: "{{ usg_exp }} --config"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+        USG_CMDS: "{{ active_ipsec_cmds }}"
+      register: ipsec_result
+      changed_when: true
+      run_once: true
+
+    - name: Show IPsec config output
+      ansible.builtin.debug:
+        var: ipsec_result.stdout_lines
+      run_once: true
+
+     # Show the raw output from the ACTIVE config push for debugging
     - name: Show ACTIVE config output
       ansible.builtin.debug:
         var: active_main_result.stdout_lines
@@ -285,4 +373,136 @@
     - name: Show DHCP pool status
       ansible.builtin.debug:
         var: dhcp_pool.stdout_lines
+      run_once: true
+
+    # =========================================================================
+    # ACL & Security Policy Verification
+    # =========================================================================
+    - name: Verify ACL 3000 configuration on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display acl 3000"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: acl_result
+      changed_when: false
+      run_once: true
+
+    - name: Show ACL 3000 configuration
+      ansible.builtin.debug:
+        var: acl_result.stdout_lines
+      run_once: true
+
+    - name: Verify Security Policy rules on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display security-policy rule all"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: sec_policy_result
+      changed_when: false
+      run_once: true
+
+    - name: Show Security Policy rules
+      ansible.builtin.debug:
+        var: sec_policy_result.stdout_lines
+      run_once: true
+
+    # =========================================================================
+    # IPsec VPN Verification
+    # =========================================================================
+    - name: Verify IKE proposal configuration on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ike proposal"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ike_proposal_result
+      changed_when: false
+      run_once: true
+
+    - name: Show IKE proposal configuration
+      ansible.builtin.debug:
+        var: ike_proposal_result.stdout_lines
+      run_once: true
+
+    - name: Verify IKE peer configuration on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ike peer"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ike_peer_result
+      changed_when: false
+      run_once: true
+
+    - name: Show IKE peer configuration
+      ansible.builtin.debug:
+        var: ike_peer_result.stdout_lines
+      run_once: true
+
+    - name: Verify IPsec proposal configuration on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ipsec proposal"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ipsec_proposal_result
+      changed_when: false
+      run_once: true
+
+    - name: Show IPsec proposal configuration
+      ansible.builtin.debug:
+        var: ipsec_proposal_result.stdout_lines
+      run_once: true
+
+    - name: Verify IPsec policy configuration on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ipsec policy"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ipsec_policy_result
+      changed_when: false
+      run_once: true
+
+    - name: Show IPsec policy configuration
+      ansible.builtin.debug:
+        var: ipsec_policy_result.stdout_lines
+      run_once: true
+
+    - name: Display current IPsec and IKE running config on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display current-configuration configuration ipsec"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: cur_ipsec_cfg
+      changed_when: false
+      run_once: true
+
+    - name: Show current IPsec running config
+      ansible.builtin.debug:
+        var: cur_ipsec_cfg.stdout_lines
+      run_once: true
+
+    - name: Check IKE SA status on ACTIVE (shows negotiated Phase 1 tunnel)
+      ansible.builtin.shell: "{{ usg_exp }} display ike sa"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ike_sa_result
+      changed_when: false
+      run_once: true
+
+    - name: Show IKE SA status
+      ansible.builtin.debug:
+        var: ike_sa_result.stdout_lines
+      run_once: true
+
+    - name: Check IPsec SA status on ACTIVE (shows negotiated Phase 2 tunnel)
+      ansible.builtin.shell: "{{ usg_exp }} display ipsec sa"
+      environment:
+        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ipsec_sa_result
+      changed_when: false
+      run_once: true
+
+    - name: Show IPsec SA status
+      ansible.builtin.debug:
+        var: ipsec_sa_result.stdout_lines
       run_once: true

@@ -1,0 +1,45 @@
+---
+- name: Test Connection to Cisco Switches
+  hosts: switches
+  gather_facts: false
+  connection: network_cli
+  tasks:
+    - name: Ping Switch (SSH check)
+      cisco.ios.ios_command:
+        commands:
+          - show clock
+      register: switch_ping
+      ignore_errors: true
+
+    - name: Display Status for Switch
+      ansible.builtin.debug:
+        msg: "Switch {{ inventory_hostname }} ({{ ansible_host }}) is UP"
+      when: switch_ping is succeeded
+
+    - name: Display Failure for Switch
+      ansible.builtin.debug:
+        msg: "Switch {{ inventory_hostname }} ({{ ansible_host }}) is DOWN"
+      when: switch_ping is failed
+
+- name: Test Connection to USG Firewalls
+  hosts: usg
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Ping USG Firewall
+      usg_ping:
+        usg_host: "{{ ansible_host }}"
+        usg_user: "{{ ansible_user }}"
+        usg_password: "{{ ansible_password }}"
+      register: usg_ping_res
+      ignore_errors: true
+
+    - name: Display Status for USG
+      ansible.builtin.debug:
+        msg: "USG Firewall {{ inventory_hostname }} ({{ ansible_host }}) is UP"
+      when: usg_ping_res is succeeded
+
+    - name: Display Failure for USG
+      ansible.builtin.debug:
+        msg: "USG Firewall {{ inventory_hostname }} ({{ ansible_host }}) is DOWN"
+      when: usg_ping_res is failed
