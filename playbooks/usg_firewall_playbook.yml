@@ -35,6 +35,12 @@
   connection: local
   vars:
     usg_exp: "{{ playbook_dir }}/../usg.exp"
+    # Ansible/automation SSH management account (admin) and its reachable
+    # management IPs. `Monirom` is a separate account used only for a demo
+    # from the LAN (trust zone), not for automation.
+    usg_mgmt_user: "admin"
+    usg_ssh_ip_active: "192.168.71.100"
+    usg_ssh_ip_standby: "192.168.71.101"
     active_host: "{{ groups['usg'] | map('extract', hostvars) | selectattr('usg_role', 'equalto', 'active') | map(attribute='inventory_hostname') | first }}"
     standby_host: "{{ groups['usg'] | difference([active_host]) | first }}"
     # One-time bootstrap for the STANDBY. Set to true only for the FIRST
@@ -64,25 +70,36 @@
       hrp interface {{ hostvars[active_host].hrp_interface }} remote {{ hostvars[active_host].hrp_remote_ip }}
       hrp mirror config enable
       dhcp enable
-      undo interface GigabitEthernet1/0/0.100
-      interface GigabitEthernet1/0/1.10
-       vlan-type dot1q 10
-       undo ip address
-       ip address 10.1.1.2 255.255.255.0
-       undo ospf mtu-enable
-       undo shutdown
-       quit
-      interface GigabitEthernet1/0/1.20
-       vlan-type dot1q 20
-       undo ip address
-       ip address 20.1.1.2 255.255.255.0
-       undo ospf mtu-enable
-       undo shutdown
-       quit
+      dns resolve
+      dns server 8.8.8.8
+      dns server 1.1.1.1
+       interface GigabitEthernet1/0/1.10
+        vlan-type dot1q 10
+        undo ip address
+        ip address 10.1.1.2 255.255.255.0
+        service-manage enable
+        service-manage ssh permit
+        service-manage ping permit
+        undo ospf mtu-enable
+        undo shutdown
+        quit
+       interface GigabitEthernet1/0/1.20
+        vlan-type dot1q 20
+        undo ip address
+        ip address 20.1.1.2 255.255.255.0
+        service-manage enable
+        service-manage ssh permit
+        service-manage ping permit
+        undo ospf mtu-enable
+        undo shutdown
+        quit
       interface GigabitEthernet1/0/4.100
        vlan-type dot1q 100
        undo ip address
        ip address 192.168.10.1 255.255.255.0
+       service-manage enable
+       service-manage ping permit
+       service-manage ssh permit
        dhcp select interface
        dhcp server dns-list 8.8.8.8
        dhcp server lease day 1
@@ -92,12 +109,16 @@
        vlan-type dot1q 200
        undo ip address
        ip address 192.168.20.1 255.255.255.0
+       service-manage enable
+       service-manage ping permit
        undo shutdown
        quit
       interface GigabitEthernet1/0/4.300
        vlan-type dot1q 300
        undo ip address
        ip address 192.168.30.1 255.255.255.0
+       service-manage enable
+       service-manage ping permit
        undo shutdown
        quit
       firewall zone untrust
@@ -111,42 +132,168 @@
       firewall zone dmz
        add interface GigabitEthernet1/0/4.300
        quit
-      ospf 1
-       area 0.0.0.0
-        network 10.1.1.0 0.0.0.255
-        network 20.1.1.0 0.0.0.255
-        network 192.168.10.0 0.0.0.255
-        network 192.168.20.0 0.0.0.255
-        network 192.168.30.0 0.0.0.255
+       ospf 1 router-id 172.16.0.1
+        area 0.0.0.0
+         network 10.1.1.0 0.0.0.255
+         network 20.1.1.0 0.0.0.255
+         network 192.168.10.0 0.0.0.255
+         network 192.168.20.0 0.0.0.255
+         network 192.168.30.0 0.0.0.255
+         quit
         quit
+       ip-link check enable
+       ip-link name isp1_link
+        destination 10.1.1.1 interface GigabitEthernet1/0/1.10
+        quit
+       ip-link name isp2_link
+        destination 20.1.1.1 interface GigabitEthernet1/0/1.20
+        quit
+       undo ip route-static 0.0.0.0 0.0.0.0 10.1.1.1
+       undo ip route-static 0.0.0.0 0.0.0.0 20.1.1.1
+       ip route-static 0.0.0.0 0.0.0.0 10.1.1.1 preference 60 track ip-link isp1_link
+       ip route-static 0.0.0.0 0.0.0.0 20.1.1.1 preference 60 track ip-link isp2_link
+       interface Tunnel1
+        ip address 10.99.0.1 255.255.255.252
+        tunnel-protocol gre
+        source 10.1.1.2
+        destination {{ ipsec_isp1_peer_ip }}
+        quit
+       firewall zone untrust
+        add interface Tunnel1
+        quit
+       ip route-static 30.30.30.0 255.255.255.240 Tunnel1
+       security-policy
+       rule name SSH_to_Local
+        destination-zone local
+        source-address 192.168.10.0 mask 255.255.255.0
+        source-address 192.168.71.0 mask 255.255.255.0
+        service ssh
+        service https
+        action permit
        quit
-      ip route-static 0.0.0.0 0.0.0.0 10.1.1.1
-      ip route-static 0.0.0.0 0.0.0.0 20.1.1.1
-      security-policy
+       rule name Deny_SSH_to_Local
+        destination-zone local
+        service ssh
+        service https
+        service telnet
+        action deny
+       quit
+       rule name Block_Staff_to_Admin
+        source-zone trust
+        destination-zone trust
+        source-address 192.168.20.0 mask 255.255.255.0
+        destination-address 192.168.10.0 mask 255.255.255.0
+        action deny
+       quit
        rule name Trust_to_Local
         source-zone trust
         destination-zone local
+        service icmp
+        service dns
         action permit
        quit
-       rule name Trust_to_Untrust
-        source-zone trust
-        destination-zone untrust
-        action permit
-       quit
-       rule name Untrust_to_Trust
-        source-zone untrust
+       rule name Local_to_Trust
+        source-zone local
         destination-zone trust
         action permit
        quit
-       rule name Trust_to_DMZ
-        source-zone trust
-        destination-zone dmz
+       rule name Local_to_Untrust
+        source-zone local
+        destination-zone untrust
+        service icmp
+        service dns
+        service ike
+        service http
+        service https
+        service ntp
         action permit
        quit
-       rule name Untrust_to_DMZ
+       rule name Untrust_to_Local_VPN
+        source-zone untrust
+        destination-zone local
+        source-address 10.1.3.3 mask 255.255.255.255
+        source-address 20.1.3.3 mask 255.255.255.255
+        service ike
+        action permit
+       quit
+       rule name Untrust_to_Local_ICMP
+        source-zone untrust
+         destination-zone local
+         service icmp
+         action permit
+        quit
+        rule name Local_to_Untrust_OSPF
+         source-zone local
+         destination-zone untrust
+         service ospf
+         action permit
+        quit
+        rule name Untrust_to_Local_OSPF
+         source-zone untrust
+         destination-zone local
+         service ospf
+         action permit
+        quit
+       rule name VPN_to_Trust
+        source-zone untrust
+        destination-zone trust
+        source-address 30.30.30.0 mask 255.255.255.240
+        destination-address 192.168.10.0 mask 255.255.255.0
+        destination-address 192.168.20.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name VPN_to_DMZ
         source-zone untrust
         destination-zone dmz
+        source-address 30.30.30.0 mask 255.255.255.240
+        destination-address 192.168.30.0 mask 255.255.255.0
         action permit
+       quit
+       rule name Admin_to_DMZ_Full
+        source-zone trust
+        destination-zone dmz
+        source-address 192.168.10.0 mask 255.255.255.0
+        destination-address 192.168.30.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name Staff_to_DMZ_WebOnly
+        source-zone trust
+        destination-zone dmz
+        source-address 192.168.20.0 mask 255.255.255.0
+        destination-address 192.168.30.0 mask 255.255.255.0
+        service http
+        service https
+        service icmp
+        action permit
+       quit
+       rule name Block_Staff_DMZ_Other
+        source-zone trust
+        destination-zone dmz
+        source-address 192.168.20.0 mask 255.255.255.0
+        destination-address 192.168.30.0 mask 255.255.255.0
+        action deny
+       quit
+       rule name Admin_to_Internet
+        source-zone trust
+        destination-zone untrust
+        source-address 192.168.10.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name Staff_to_Internet_Web
+        source-zone trust
+        destination-zone untrust
+        source-address 192.168.20.0 mask 255.255.255.0
+        service http
+        service https
+        service dns
+        service icmp
+        action permit
+       quit
+       rule name Block_Staff_Other_Internet
+        source-zone trust
+        destination-zone untrust
+        source-address 192.168.20.0 mask 255.255.255.0
+        action deny
        quit
        rule name DMZ_to_Untrust
         source-zone dmz
@@ -154,6 +301,62 @@
         action permit
        quit
       quit
+       nat-policy
+        rule name NO_NAT_To_Remote_VPN
+         source-zone trust
+         destination-zone untrust
+         destination-address 30.30.30.0 mask 255.255.255.240
+         action no-nat
+        quit
+        rule name Trust_to_Untrust_NAT
+         source-zone trust
+        destination-zone untrust
+        source-address 192.168.10.0 mask 255.255.255.0
+        source-address 192.168.20.0 mask 255.255.255.0
+        action source-nat easy-ip
+       quit
+       rule name DMZ_to_Untrust_NAT
+        source-zone dmz
+        destination-zone untrust
+        source-address 192.168.30.0 mask 255.255.255.0
+        action source-nat easy-ip
+       quit
+       rule name Local_to_Untrust_NAT
+        source-zone local
+        destination-zone untrust
+        action source-nat easy-ip
+       quit
+      quit
+      update schedule location-sdb weekly Sun 00:08
+      update schedule ips-sdb daily 02:00
+      update schedule av-sdb daily 02:30
+      update schedule url-remote-query enable
+      interface GigabitEthernet0/0/0
+       service-manage enable
+       service-manage ssh permit
+       service-manage ping permit
+       service-manage https permit
+       undo shutdown
+       quit
+      aaa
+       manager-user Monirom
+        password cipher proxy@m@n!r0m
+        service-type ssh terminal
+        level 15
+        quit
+       bind manager-user Monirom role system-admin
+       quit
+      stelnet server enable
+      undo telnet server enable
+      undo telnet ipv6 server enable
+      undo ssh server compatible-ssh1x enable
+      ssh authentication-type default password
+      ssh user Monirom authentication-type password
+      ssh user Monirom service-type all
+      user-interface vty 0 4
+       authentication-mode aaa
+       protocol inbound ssh
+       quit
 
     active_hrp_cmds: |-
       hrp enable
@@ -188,96 +391,62 @@
      # =========================================================================
     ipsec_remote_subnet: 30.30.30.0 0.0.0.15
     ipsec_remote_cn: Monirom-USG6000V
-    ipsec_isp1_peer_ip: 10.1.1.3
-    ipsec_isp2_peer_ip: 20.1.1.3
+    ipsec_isp1_peer_ip: 10.1.3.3
+    ipsec_isp2_peer_ip: 20.1.3.3
     ipsec_local_cn: USG6000V2-Primary
 
     active_ipsec_cmds: |-
        ike proposal 1
         encryption-algorithm aes-256
         authentication-algorithm sha2-256
-        authentication-method rsa-signature
+        authentication-method pre-share
         integrity-algorithm hmac-sha2-256
         dh group14
         sa duration 86400
         quit
-       ike peer peer-vpn1
-        version 2
-        ike-proposal 1
-        remote-address {{ ipsec_isp1_peer_ip }}
-        remote-id-type fqdn
-        remote-id {{ ipsec_remote_cn }}
-        quit
-       ike peer peer-vpn2
-        version 2
-        ike-proposal 1
-        remote-address {{ ipsec_isp2_peer_ip }}
-        remote-id-type fqdn
-        remote-id {{ ipsec_remote_cn }}
-        quit
-       ipsec proposal prop-vpn
-        esp authentication-algorithm sha2-256
-        esp encryption-algorithm aes-256
-        quit
-       acl number 3000
-        rule 5 permit ip source 192.168.10.0 0.0.0.255 destination {{ ipsec_remote_subnet }}
-        rule 10 permit ip source 192.168.20.0 0.0.0.255 destination {{ ipsec_remote_subnet }}
-        rule 15 permit ip source 192.168.30.0 0.0.0.255 destination {{ ipsec_remote_subnet }}
-        rule 20 permit ip source {{ ipsec_remote_subnet }} destination 192.168.10.0 0.0.0.255
-        rule 25 permit ip source {{ ipsec_remote_subnet }} destination 192.168.20.0 0.0.0.255
-        rule 30 permit ip source {{ ipsec_remote_subnet }} destination 192.168.30.0 0.0.0.255
-        quit
-       ipsec policy policy-vpn1 1 isakmp
-        security acl 3000
-        ike-peer peer-vpn1
-        proposal prop-vpn
-        pfs dh-group14
-        quit
-       ipsec policy policy-vpn2 1 isakmp
-        security acl 3000
-        ike-peer peer-vpn2
-        proposal prop-vpn
-        pfs dh-group14
-        quit
-       interface GigabitEthernet1/0/1.10
-        ipsec policy policy-vpn1
-        quit
-       interface GigabitEthernet1/0/1.20
-        ipsec policy policy-vpn2
-        quit
-       pki rsa local-key-pair create cert-key modulus 2048 exportable
-       pki create-certificate self-signed filename local-cert
+        ike peer peer-vpn1
+         version 1
+         ike-proposal 1
+         pre-shared-key simple Monirom123
+         remote-address {{ ipsec_isp1_peer_ip }}
+         quit
+        ipsec proposal prop-vpn
+         esp authentication-algorithm sha2-256
+         esp encryption-algorithm aes-256
+         quit
+        acl number 3001
+         rule 5 permit gre source 10.1.1.2 0 destination {{ ipsec_isp1_peer_ip }} 0
+         rule 10 permit gre source {{ ipsec_isp1_peer_ip }} 0 destination 10.1.1.2 0
+         quit
+        ipsec policy policy-gre 1 isakmp
+         security acl 3001
+         ike-peer peer-vpn1
+         proposal prop-vpn
+         pfs dh-group14
+         quit
+        # Bind GRE IPsec policy to the primary WAN interface (safe since it only encrypts GRE)
+        interface GigabitEthernet1/0/1.10
+         ipsec policy policy-gre
+         quit
+        interface GigabitEthernet1/0/1.20
+         undo ipsec policy
+         quit
 
   tasks:
-    # Push full L3 config (sub-interfaces, zones, OSPF, policies, heartbeat) to
-    # the ACTIVE firewall. HRP is NOT enabled yet — we apply the config first,
-    # then enable HRP so the standby mirrors a complete config.
-    - name: Push full config to ACTIVE firewall
+    # Push full configuration (L3 sub-interfaces, zones, OSPF, IP-Link, routes,
+    # security policies, SSH management, Monirom admin account, IPsec)
+    # in a single atomic SSH session to avoid connection collisions and write-locks.
+    - name: Push complete configuration to ACTIVE firewall
       ansible.builtin.shell: "{{ usg_exp }} --config"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
-        USG_CMDS: "{{ active_main_cmds }}"
+        USG_CMDS: "{{ active_main_cmds }}\n{{ active_ipsec_cmds }}"
       register: active_main_result
       changed_when: true
       run_once: true
 
-    - name: Push IPsec VPN config to ACTIVE firewall
-      ansible.builtin.shell: "{{ usg_exp }} --config"
-      environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
-        USG_PASS: "{{ hostvars[active_host].usg_password }}"
-        USG_CMDS: "{{ active_ipsec_cmds }}"
-      register: ipsec_result
-      changed_when: true
-      run_once: true
-
-    - name: Show IPsec config output
-      ansible.builtin.debug:
-        var: ipsec_result.stdout_lines
-      run_once: true
-
-     # Show the raw output from the ACTIVE config push for debugging
     - name: Show ACTIVE config output
       ansible.builtin.debug:
         var: active_main_result.stdout_lines
@@ -290,7 +459,8 @@
     - name: Push heartbeat + HRP to STANDBY firewall
       ansible.builtin.shell: "{{ usg_exp }} --config"
       environment:
-        USG_HOST: "{{ hostvars[standby_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_standby }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[standby_host].usg_password }}"
         USG_CMDS: "{{ standby_cmds }}"
       register: standby_result
@@ -304,25 +474,16 @@
       when: bootstrap_standby
       run_once: true
 
-    - name: Enable HRP on ACTIVE firewall (final step)
-      ansible.builtin.shell: "{{ usg_exp }} --config"
-      environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
-        USG_PASS: "{{ hostvars[active_host].usg_password }}"
-        USG_CMDS: "{{ active_hrp_cmds }}"
-      register: active_hrp_result
-      changed_when: true
-      run_once: true
-
-    - name: Show ACTIVE HRP enable output
-      ansible.builtin.debug:
-        var: active_hrp_result.stdout_lines
+    - name: Wait for firewall to finish flash commit and VTY release
+      ansible.builtin.pause:
+        seconds: 5
       run_once: true
 
     - name: Verify HRP state on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display hrp state"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: hrp_state
       changed_when: false
@@ -336,7 +497,8 @@
     - name: Verify HRP state on STANDBY
       ansible.builtin.shell: "{{ usg_exp }} display hrp state"
       environment:
-        USG_HOST: "{{ hostvars[standby_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_standby }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[standby_host].usg_password }}"
       register: hrp_state_stdby
       changed_when: false
@@ -350,7 +512,8 @@
     - name: Verify OSPF neighbors on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display ospf peer"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: ospf_peer
       changed_when: false
@@ -364,7 +527,8 @@
     - name: Verify DHCP pool for VLAN 100 on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display ip pool interface GigabitEthernet1/0/4.100 used"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: dhcp_pool
       changed_when: false
@@ -381,7 +545,8 @@
     - name: Verify ACL 3000 configuration on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display acl 3000"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: acl_result
       changed_when: false
@@ -395,7 +560,8 @@
     - name: Verify Security Policy rules on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display security-policy rule all"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: sec_policy_result
       changed_when: false
@@ -412,7 +578,8 @@
     - name: Verify IKE proposal configuration on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display ike proposal"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: ike_proposal_result
       changed_when: false
@@ -426,7 +593,8 @@
     - name: Verify IKE peer configuration on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display ike peer"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: ike_peer_result
       changed_when: false
@@ -440,7 +608,8 @@
     - name: Verify IPsec proposal configuration on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display ipsec proposal"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: ipsec_proposal_result
       changed_when: false
@@ -454,7 +623,8 @@
     - name: Verify IPsec policy configuration on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display ipsec policy"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: ipsec_policy_result
       changed_when: false
@@ -468,7 +638,8 @@
     - name: Display current IPsec and IKE running config on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display current-configuration configuration ipsec"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: cur_ipsec_cfg
       changed_when: false
@@ -482,7 +653,8 @@
     - name: Check IKE SA status on ACTIVE (shows negotiated Phase 1 tunnel)
       ansible.builtin.shell: "{{ usg_exp }} display ike sa"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: ike_sa_result
       changed_when: false
@@ -496,7 +668,8 @@
     - name: Check IPsec SA status on ACTIVE (shows negotiated Phase 2 tunnel)
       ansible.builtin.shell: "{{ usg_exp }} display ipsec sa"
       environment:
-        USG_HOST: "{{ hostvars[active_host].ansible_host }}"
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
       register: ipsec_sa_result
       changed_when: false
@@ -505,4 +678,85 @@
     - name: Show IPsec SA status
       ansible.builtin.debug:
         var: ipsec_sa_result.stdout_lines
+      run_once: true
+
+    # =========================================================================
+    # IP-Link Health Check & Routing Verification
+    # =========================================================================
+    - name: Verify IP-Link health check status on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ip-link"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: ip_link_result
+      changed_when: false
+      run_once: true
+
+    - name: Show IP-Link health check status
+      ansible.builtin.debug:
+        var: ip_link_result.stdout_lines
+      run_once: true
+
+    - name: Verify Active Default Route on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display ip routing-table 0.0.0.0"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: default_route_result
+      changed_when: false
+      run_once: true
+
+    - name: Show Active Default Route
+      ansible.builtin.debug:
+        var: default_route_result.stdout_lines
+      run_once: true
+
+    # =========================================================================
+    # Secure SSH Management & Administrator Verification
+    # =========================================================================
+    - name: Verify Monirom Administrator Account on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display manager-user Monirom"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: admin_user_result
+      changed_when: false
+      run_once: true
+
+    - name: Show Monirom Administrator Account details
+      ansible.builtin.debug:
+        var: admin_user_result.stdout_lines
+      run_once: true
+
+    - name: Verify STelnet and SSH Server Status on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display stelnet server status"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: stelnet_status_result
+      changed_when: false
+      run_once: true
+
+    - name: Show STelnet Server Status
+      ansible.builtin.debug:
+        var: stelnet_status_result.stdout_lines
+      run_once: true
+
+    - name: Verify ACL 2000 Management Restriction on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display acl 2000"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: acl2000_result
+      changed_when: false
+      run_once: true
+
+    - name: Show ACL 2000 Management Restriction
+      ansible.builtin.debug:
+        var: acl2000_result.stdout_lines
       run_once: true
