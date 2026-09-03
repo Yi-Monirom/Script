@@ -162,171 +162,173 @@
         add interface Tunnel1
         quit
        ip route-static 30.30.30.0 255.255.255.240 Tunnel1
-       security-policy
-       rule name SSH_to_Local
-        destination-zone local
-        source-address 192.168.10.0 mask 255.255.255.0
-        source-address 192.168.71.0 mask 255.255.255.0
-        service ssh
-        service https
-        action permit
-       quit
-       rule name Deny_SSH_to_Local
-        destination-zone local
-        service ssh
-        service https
-        service telnet
-        action deny
-       quit
-       rule name Block_Staff_to_Admin
-        source-zone trust
-        destination-zone trust
-        source-address 192.168.20.0 mask 255.255.255.0
-        destination-address 192.168.10.0 mask 255.255.255.0
-        action deny
-       quit
-       rule name Trust_to_Local
-        source-zone trust
-        destination-zone local
-        service icmp
-        service dns
-        action permit
-       quit
-       rule name Local_to_Trust
-        source-zone local
-        destination-zone trust
-        action permit
-       quit
-       rule name Local_to_Untrust
-        source-zone local
-        destination-zone untrust
-        service icmp
-        service dns
-        service ike
-        service http
-        service https
-        service ntp
-        action permit
-       quit
-       rule name Untrust_to_Local_VPN
-        source-zone untrust
-        destination-zone local
-        source-address 10.1.3.3 mask 255.255.255.255
-        source-address 20.1.3.3 mask 255.255.255.255
-        service ike
-        action permit
-       quit
-       rule name Untrust_to_Local_ICMP
-        source-zone untrust
+        security-policy
+        rule name VPN_to_Trust
+         source-zone untrust
+         destination-zone trust
+         source-address 30.30.30.0 mask 255.255.255.240
+         destination-address 192.168.10.0 mask 255.255.255.0
+         destination-address 192.168.20.0 mask 255.255.255.0
+         action permit
+        quit
+        rule name Local_to_Untrust
+         source-zone local
+         destination-zone untrust
+         service dns
+         service http
+         service https
+         service icmp
+         service ntp
+         action permit
+        quit
+        rule name VPN_to_DMZ
+         source-zone untrust
+         destination-zone dmz
+         source-address 30.30.30.0 mask 255.255.255.240
+         destination-address 192.168.30.0 mask 255.255.255.0
+         action permit
+        quit
+        rule name DMZ_to_Untrust
+         source-zone dmz
+         destination-zone untrust
+         action permit
+        quit
+        rule name Trust_to_Local
+         source-zone trust
+         destination-zone local
+         service dns
+         service icmp
+         action permit
+        quit
+        rule name Untrust_to_Local_VPN
+         source-zone untrust
+         destination-zone local
+         source-address 10.1.1.3 mask 255.255.255.255
+         source-address 10.1.3.3 mask 255.255.255.255
+         source-address 20.1.1.3 mask 255.255.255.255
+         source-address 20.1.3.3 mask 255.255.255.255
+         action permit
+        quit
+        rule name Local_to_Trust
+         source-zone local
+         destination-zone trust
+         action permit
+        quit
+        rule name Untrust_to_Local_ICMP
+         source-zone untrust
          destination-zone local
          service icmp
          action permit
         quit
+        rule name SSH_to_Local
+         destination-zone local
+         source-address 192.168.10.0 mask 255.255.255.0
+         source-address 192.168.71.0 mask 255.255.255.0
+         service https
+         service ssh
+         action permit
+        quit
+        rule name Deny_SSH_to_Local
+         destination-zone local
+         service https
+         service ssh
+         service telnet
+         action deny
+        quit
+        rule name Block_Staff_to_Admin
+         source-zone trust
+         destination-zone trust
+         source-address 192.168.20.0 mask 255.255.255.0
+         destination-address 192.168.10.0 mask 255.255.255.0
+         action deny
+        quit
+        rule name Admin_to_DMZ_Full
+         source-zone trust
+         destination-zone dmz
+         source-address 192.168.10.0 mask 255.255.255.0
+         destination-address 192.168.30.0 mask 255.255.255.0
+         action permit
+        quit
+        rule name Staff_to_DMZ_WebOnly
+         source-zone trust
+         destination-zone dmz
+         source-address 192.168.20.0 mask 255.255.255.0
+         destination-address 192.168.30.0 mask 255.255.255.0
+         service http
+         service https
+         service icmp
+         action permit
+        quit
+        rule name Block_Staff_to_DMZ_Backend
+         source-zone trust
+         destination-zone dmz
+         source-address 192.168.20.0 mask 255.255.255.0
+         destination-address 192.168.30.0 mask 255.255.255.0
+         action deny
+        quit
+        rule name Admin_to_Internet
+         source-zone trust
+         destination-zone untrust
+         source-address 192.168.10.0 mask 255.255.255.0
+         action permit
+        quit
+        rule name Staff_to_Internet_Productivity
+         source-zone trust
+         destination-zone untrust
+         source-address 192.168.20.0 mask 255.255.255.0
+         service dns
+         service http
+         service https
+         service icmp
+         action permit
+        quit
+        rule name Block_Staff_Other_Internet
+         source-zone trust
+         destination-zone untrust
+         source-address 192.168.20.0 mask 255.255.255.0
+         action deny
+        quit
         rule name Local_to_Untrust_OSPF
          source-zone local
          destination-zone untrust
+         service gre
          service ospf
          action permit
         quit
         rule name Untrust_to_Local_OSPF
          source-zone untrust
          destination-zone local
+         service gre
          service ospf
          action permit
         quit
-       rule name VPN_to_Trust
-        source-zone untrust
-        destination-zone trust
-        source-address 30.30.30.0 mask 255.255.255.240
-        destination-address 192.168.10.0 mask 255.255.255.0
-        destination-address 192.168.20.0 mask 255.255.255.0
-        action permit
        quit
-       rule name VPN_to_DMZ
-        source-zone untrust
-        destination-zone dmz
-        source-address 30.30.30.0 mask 255.255.255.240
-        destination-address 192.168.30.0 mask 255.255.255.0
-        action permit
+        nat-policy
+         rule name Local_to_Untrust_NAT
+          source-zone local
+          destination-zone untrust
+          action source-nat easy-ip
+         quit
+         rule name Trust_to_Untrust_NAT
+          source-zone trust
+          destination-zone untrust
+          source-address 192.168.10.0 mask 255.255.255.0
+          source-address 192.168.20.0 mask 255.255.255.0
+          action source-nat easy-ip
+         quit
+         rule name DMZ_to_Untrust_NAT
+          source-zone dmz
+          destination-zone untrust
+          source-address 192.168.30.0 mask 255.255.255.0
+          action source-nat easy-ip
+         quit
+         rule name NO_NAT_To_Remote_VPN
+          source-zone trust
+          destination-zone untrust
+          destination-address 30.30.30.0 mask 255.255.255.240
+          action no-nat
+         quit
        quit
-       rule name Admin_to_DMZ_Full
-        source-zone trust
-        destination-zone dmz
-        source-address 192.168.10.0 mask 255.255.255.0
-        destination-address 192.168.30.0 mask 255.255.255.0
-        action permit
-       quit
-       rule name Staff_to_DMZ_WebOnly
-        source-zone trust
-        destination-zone dmz
-        source-address 192.168.20.0 mask 255.255.255.0
-        destination-address 192.168.30.0 mask 255.255.255.0
-        service http
-        service https
-        service icmp
-        action permit
-       quit
-       rule name Block_Staff_DMZ_Other
-        source-zone trust
-        destination-zone dmz
-        source-address 192.168.20.0 mask 255.255.255.0
-        destination-address 192.168.30.0 mask 255.255.255.0
-        action deny
-       quit
-       rule name Admin_to_Internet
-        source-zone trust
-        destination-zone untrust
-        source-address 192.168.10.0 mask 255.255.255.0
-        action permit
-       quit
-       rule name Staff_to_Internet_Web
-        source-zone trust
-        destination-zone untrust
-        source-address 192.168.20.0 mask 255.255.255.0
-        service http
-        service https
-        service dns
-        service icmp
-        action permit
-       quit
-       rule name Block_Staff_Other_Internet
-        source-zone trust
-        destination-zone untrust
-        source-address 192.168.20.0 mask 255.255.255.0
-        action deny
-       quit
-       rule name DMZ_to_Untrust
-        source-zone dmz
-        destination-zone untrust
-        action permit
-       quit
-      quit
-       nat-policy
-        rule name NO_NAT_To_Remote_VPN
-         source-zone trust
-         destination-zone untrust
-         destination-address 30.30.30.0 mask 255.255.255.240
-         action no-nat
-        quit
-        rule name Trust_to_Untrust_NAT
-         source-zone trust
-        destination-zone untrust
-        source-address 192.168.10.0 mask 255.255.255.0
-        source-address 192.168.20.0 mask 255.255.255.0
-        action source-nat easy-ip
-       quit
-       rule name DMZ_to_Untrust_NAT
-        source-zone dmz
-        destination-zone untrust
-        source-address 192.168.30.0 mask 255.255.255.0
-        action source-nat easy-ip
-       quit
-       rule name Local_to_Untrust_NAT
-        source-zone local
-        destination-zone untrust
-        action source-nat easy-ip
-       quit
-      quit
       update schedule location-sdb weekly Sun 00:08
       update schedule ips-sdb daily 02:00
       update schedule av-sdb daily 02:30
