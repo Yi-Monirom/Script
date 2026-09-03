@@ -207,6 +207,18 @@
          source-address 10.1.3.3 mask 255.255.255.255
          source-address 20.1.1.3 mask 255.255.255.255
          source-address 20.1.3.3 mask 255.255.255.255
+         service gre
+         service esp
+         service ah
+         service protocol udp destination-port 500
+         service protocol udp destination-port 4500
+         action permit
+        quit
+        rule name Untrust_to_Local_L2TP
+         source-zone untrust
+         destination-zone local
+         service ike
+         service l2tp
          action permit
         quit
         rule name Local_to_Trust
