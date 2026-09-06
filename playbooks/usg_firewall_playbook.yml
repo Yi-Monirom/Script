@@ -60,6 +60,8 @@
     #     route that OSPF should install from the ISPs' ASE LSA.
     active_main_cmds: |-
       sysname {{ hostvars[active_host].usg_sysname }}
+      l2tp enable
+      l2tp domain suffix-separator @
       interface {{ hostvars[active_host].hrp_interface }}
        ip address {{ hostvars[active_host].hrp_local_ip }} {{ hostvars[active_host].hrp_netmask }}
        undo shutdown
@@ -121,6 +123,19 @@
        service-manage ping permit
        undo shutdown
        quit
+      interface Virtual-Template1
+       ppp authentication-mode chap
+       remote address 192.168.40.10
+       ip address 192.168.40.1 255.255.255.0
+       quit
+      ip pool vpn_l2tp_pool
+       section 0 192.168.40.10 192.168.40.50
+       quit
+      l2tp-group 1
+       mandatory-chap
+       undo tunnel authentication
+       allow l2tp virtual-template 1 remote monirom-Legion-5
+       quit
       firewall zone untrust
        add interface GigabitEthernet1/0/1.10
        add interface GigabitEthernet1/0/1.20
@@ -128,6 +143,7 @@
       firewall zone trust
        add interface GigabitEthernet1/0/4.100
        add interface GigabitEthernet1/0/4.200
+       add interface Virtual-Template1
        quit
       firewall zone dmz
        add interface GigabitEthernet1/0/4.300
@@ -161,17 +177,36 @@
        firewall zone untrust
         add interface Tunnel1
         quit
-       ip route-static 30.30.30.0 255.255.255.240 Tunnel1
-        security-policy
-        rule name VPN_to_Trust
-         source-zone untrust
-         destination-zone trust
-         source-address 30.30.30.0 mask 255.255.255.240
-         destination-address 192.168.10.0 mask 255.255.255.0
-         destination-address 192.168.20.0 mask 255.255.255.0
-         action permit
-        quit
-        rule name Local_to_Untrust
+        ip route-static 30.30.30.0 255.255.255.240 Tunnel1
+        ip route-static 192.168.40.0 255.255.255.0 192.168.30.51
+        nat server wg_dmz_server zone untrust protocol udp global 10.1.1.2 51820 inside 192.168.30.51 51820
+        nat server wg_dmz_server2 zone untrust protocol udp global 20.1.1.2 51820 inside 192.168.30.51 51820
+         security-policy
+         rule name VPN_to_Trust
+          source-zone untrust
+          destination-zone trust
+          source-address 30.30.30.0 mask 255.255.255.240
+          destination-address 192.168.10.0 mask 255.255.255.0
+          destination-address 192.168.20.0 mask 255.255.255.0
+          action permit
+         quit
+         rule name Untrust_to_DMZ_WireGuard
+          source-zone untrust
+          destination-zone dmz
+          destination-address 192.168.30.51 mask 255.255.255.255
+          service protocol udp destination-port 51820
+          action permit
+         quit
+         rule name DMZ_VPN_to_Trust
+          source-zone dmz
+          destination-zone trust
+          source-address 192.168.30.51 mask 255.255.255.255
+          source-address 192.168.40.0 mask 255.255.255.0
+          destination-address 192.168.10.0 mask 255.255.255.0
+          destination-address 192.168.20.0 mask 255.255.255.0
+          action permit
+         quit
+         rule name Local_to_Untrust
          source-zone local
          destination-zone untrust
          service dns
@@ -215,10 +250,29 @@
          action permit
         quit
         rule name Untrust_to_Local_L2TP
+         source-zone trust
          source-zone untrust
          destination-zone local
-         service ike
          service l2tp
+         service protocol udp destination-port 1701
+         action permit
+        quit
+        rule name VPN_Clients_to_Trust
+         source-zone trust
+         destination-zone trust
+         source-address 192.168.40.0 mask 255.255.255.0
+         action permit
+        quit
+        rule name L2TP_to_Trust
+         source-zone trust
+         destination-zone trust
+         source-address 192.168.40.0 mask 255.255.255.0
+         action permit
+        quit
+        rule name L2TP_to_Local
+         source-zone trust
+         destination-zone local
+         source-address 192.168.40.0 mask 255.255.255.0
          action permit
         quit
         rule name Local_to_Trust
@@ -353,6 +407,15 @@
        undo shutdown
        quit
       aaa
+       service-scheme vpn_l2tp
+        ip-pool vpn_l2tp_pool
+        quit
+       domain default
+        service-scheme vpn_l2tp
+        service-type internetaccess ssl-vpn l2tp ike
+        internet-access mode auto-online
+        reference user current-domain
+        quit
        manager-user Monirom
         password cipher proxy@m@n!r0m
         service-type ssh terminal
@@ -373,7 +436,13 @@
        quit
 
     active_hrp_cmds: |-
-      hrp enable
+       hrp interface GigabitEthernet1/0/3 remote 172.16.0.2
+       hrp mirror config enable
+       hrp mirror session enable
+       hrp track ip-link isp1_link
+       hrp track ip-link isp2_link
+       hrp enable
+       hrp switch active
 
     standby_cmds: |-
       sysname {{ hostvars[standby_host].usg_sysname }}
@@ -389,7 +458,7 @@
       hrp switch standby
 
      # =========================================================================
-     # IPsec site-to-site VPN (dual ISP, IKEv2, certificate auth)
+     # IPsec site-to-site VPN (dual ISP, PSK)
      #
      #   Active/standby tunnels:
      #     Tunnel 1 (primary):  10.1.1.2  <-> 10.1.1.3  (ISP1)
@@ -411,40 +480,40 @@
 
     active_ipsec_cmds: |-
        ike proposal 1
-        encryption-algorithm aes-256
-        authentication-algorithm sha2-256
+        encryption-algorithm aes-256 aes-128 3des
+        dh group14 group2
+        authentication-algorithm sha2-256 sha1
         authentication-method pre-share
         integrity-algorithm hmac-sha2-256
-        dh group14
+        prf hmac-sha2-256
         sa duration 86400
         quit
-        ike peer peer-vpn1
-         version 1
-         ike-proposal 1
-         pre-shared-key simple Monirom123
-         remote-address {{ ipsec_isp1_peer_ip }}
-         quit
-        ipsec proposal prop-vpn
-         esp authentication-algorithm sha2-256
-         esp encryption-algorithm aes-256
-         quit
-        acl number 3001
-         rule 5 permit gre source 10.1.1.2 0 destination {{ ipsec_isp1_peer_ip }} 0
-         rule 10 permit gre source {{ ipsec_isp1_peer_ip }} 0 destination 10.1.1.2 0
-         quit
-        ipsec policy policy-gre 1 isakmp
-         security acl 3001
-         ike-peer peer-vpn1
-         proposal prop-vpn
-         pfs dh-group14
-         quit
-        # Bind GRE IPsec policy to the primary WAN interface (safe since it only encrypts GRE)
-        interface GigabitEthernet1/0/1.10
-         ipsec policy policy-gre
-         quit
-        interface GigabitEthernet1/0/1.20
-         undo ipsec policy
-         quit
+       ike peer peer-vpn1
+        pre-shared-key simple Monirom123
+        ike-proposal 1
+        remote-address {{ ipsec_isp1_peer_ip }}
+        quit
+       ipsec proposal prop-vpn
+        esp authentication-algorithm sha2-256
+        esp encryption-algorithm aes-256
+        quit
+       acl number 3001
+        rule 5 permit gre source 10.1.1.2 0 destination {{ ipsec_isp1_peer_ip }} 0
+        rule 10 permit gre source {{ ipsec_isp1_peer_ip }} 0 destination 10.1.1.2 0
+        quit
+       ipsec policy policy-gre 1 isakmp
+        security acl 3001
+        pfs dh-group14
+        ike-peer peer-vpn1
+        proposal prop-vpn
+        quit
+       # Bind GRE IPsec policy to the primary WAN interface (safe since it only encrypts GRE)
+       interface GigabitEthernet1/0/1.10
+        ipsec policy policy-gre
+        quit
+       interface GigabitEthernet1/0/1.20
+        undo ipsec policy
+        quit
 
   tasks:
     # Push full configuration (L3 sub-interfaces, zones, OSPF, IP-Link, routes,
@@ -456,7 +525,7 @@
         USG_HOST: "{{ usg_ssh_ip_active }}"
         USG_USER: "{{ usg_mgmt_user }}"
         USG_PASS: "{{ hostvars[active_host].usg_password }}"
-        USG_CMDS: "{{ active_main_cmds }}\n{{ active_ipsec_cmds }}"
+        USG_CMDS: "{{ active_main_cmds }}\n{{ active_hrp_cmds }}\n{{ active_ipsec_cmds }}"
       register: active_main_result
       changed_when: true
       run_once: true
