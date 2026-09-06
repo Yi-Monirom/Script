@@ -17,3 +17,5 @@ notes.md
 .env
 .env.*
 .vault_pass
+
+moniom.cfg
