@@ -22,6 +22,10 @@
 
 set timeout 30
 
+# Increase the expect match buffer so large outputs (e.g. the full running
+# config, which can exceed the ~8KB default) are captured completely.
+match_max 1000000
+
 set host   [expr {[info exists env(USG_HOST)]   ? $env(USG_HOST)   : "192.168.71.100"}]
 set port   [expr {[info exists env(USG_PORT)]   ? $env(USG_PORT)   : "22"}]
 set user   [expr {[info exists env(USG_USER)]   ? $env(USG_USER)   : "admin"}]
@@ -80,6 +84,68 @@ expect {
     eof    { fail "connection closed while disabling paging" }
 }
 
+# Capture the interface IP map once (used in --config mode to skip commands
+# whose effect is already in place, so re-runs never flap interfaces or
+# disturb the live IPsec tunnel). `display ip interface brief` is compact
+# and gives interface -> IP/mask in one small output that always fits.
+set running_cfg ""
+if {$mode eq "config"} {
+    send -- "display ip interface brief\r"
+    expect {
+        -re "$user_prompt" {
+            set running_cfg $expect_out(buffer)
+        }
+        timeout { fail "could not read ip interface brief" }
+        eof    { fail "connection closed reading ip interface brief" }
+    }
+    # remove command echo and prompt
+    regsub -all -- "display ip interface brief" $running_cfg "" running_cfg
+    regsub -all -- {HRP_[MS]<USG6000V2[^>]*>} $running_cfg "" running_cfg
+}
+
+# Build a map of interface name -> list of "IP MASK" already configured.
+# Parses `display ip interface brief` output:
+#   GigabitEthernet1/0/1.10           10.1.1.2/24          up         up
+# Interfaces listed as `unassigned` are skipped (no entry -> no address).
+proc build_if_ip_map {cfg} {
+    array set m [list]
+    foreach line [split $cfg "\n"] {
+        set line [string trim $line]
+        # match: "GigabitEthernet1/0/1.10           10.1.1.2/24          up"
+        if {[regexp {^(\S+?)\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/(\d{1,2})\s} $line -> ifname ip bits]} {
+            set ifname [regsub {\(.+\)$} $ifname ""]
+            # convert CIDR prefix to dotted mask
+            set v 0
+            for {set i 0} {$i < 32} {incr i} {
+                if {$i < $bits} { set v [expr {$v | (1 << (31 - $i))}] }
+            }
+            set mask [format "%d.%d.%d.%d" [expr {($v >> 24) & 0xFF}] \
+                      [expr {($v >> 16) & 0xFF}] [expr {($v >> 8) & 0xFF}] \
+                      [expr {$v & 0xFF}]]
+            if {![info exists m($ifname)]} { set m($ifname) [list] }
+            lappend m($ifname) "$ip $mask"
+        }
+    }
+    return [array get m]
+}
+
+# Return 1 if interface $if already has the exact address $ip (regex-safe), else 0.
+proc if_has_ip {if_ip_map if ip} {
+    array set m $if_ip_map
+    if {![info exists m($if)]} { return 0 }
+    foreach entry $m($if) {
+        set existing [lindex $entry 0]
+        if {$existing eq $ip} { return 1 }
+    }
+    return 0
+}
+
+# Return 1 if interface $if has ANY configured address, else 0.
+proc if_has_any_ip {if_ip_map if} {
+    array set m $if_ip_map
+    return [info exists m($if)]
+}
+
 if {$mode eq "command"} {
     # ---- run a single user-view command ----
     send -- "$command\r"
@@ -133,9 +199,37 @@ expect {
     eof    { fail "connection closed entering system view" }
 }
 
+# Build the interface->IP map from the captured running config once, so the
+# ip-address idempotency guard can skip flapping already-configured interfaces.
+set if_ip_map [build_if_ip_map $running_cfg]
+
 foreach cmd $cmds {
     set cmd [string trim $cmd]
     if {$cmd eq ""} { continue }
+
+    # ---- idempotency guard for interface IP re-assignment ----
+    # Re-issuing `undo ip address` + `ip address` on an interface that already
+    # has the address FLAPS the interface and (on the IPsec WAN GE1/0/1.10)
+    # tears down the tunnel. Skip both lines when the target IP is already set.
+    if {[regexp {^interface\s+(\S+)$} $cmd -> cur_if]} {
+        # entering an interface context; remember it for ip-address checks
+    }
+    set skip 0
+    if {[info exists cur_if] && [info exists if_ip_map]} {
+        if {[regexp {^undo ip address$} $cmd] && [if_has_any_ip $if_ip_map $cur_if]} {
+            # interface already has an address -> do not flap it
+            set skip 1
+        } elseif {[regexp {^ip address\s+(\S+)\s+(\S+)$} $cmd -> skip_ip skip_mask] \
+                  && [if_has_ip $if_ip_map $cur_if $skip_ip]} {
+            # exact address already set -> do not re-apply (would reset the port)
+            set skip 1
+        }
+    }
+    if {$skip} {
+        puts "SKIP: $cmd (already configured)"
+        continue
+    }
+
     send -- "$cmd\r"
     expect {
         -nocase -re {Are you sure to continue\? \[Y/N\]:} {
