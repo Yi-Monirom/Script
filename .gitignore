@@ -8,6 +8,7 @@ __pycache__/
 *.retry
 Inventory/group_vars/switches.yml
 Inventory/group_vars/usg.yml
+Inventory/group_vars/dmz.yml
 playbooks/edge_switches_playbook.yml
 notes.md
 
