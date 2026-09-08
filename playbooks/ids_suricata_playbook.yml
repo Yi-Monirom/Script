@@ -1,0 +1,113 @@
+---
+# IDS/IPS automation for the DMZ Suricata server (192.168.30.50 / ids-server).
+#
+# NOTE: This host is Ubuntu 16.04 (xenial) with Python 3.5 only. ansible-core
+# 2.21 requires Python >= 3.6 on managed nodes, therefore every task uses the
+# `raw` module (SSH + shell) and enforces idempotency with shell guards.
+- name: Automate IDS/IPS - Suricata config, rules and EveBox on ids-server
+  hosts: ids-server
+  gather_facts: no
+
+  vars:
+    suricata_config: /etc/suricata/suricata-debian.yaml
+    rules_dir: /etc/suricata/rules
+    thesis_rules_src: ../files/thesis.rules
+    home_net: '[192.168.10.0/24,192.168.20.0/24,192.168.30.0/24]'
+    mirror_interface: ens3
+
+  tasks:
+
+    - name: Are we online
+      raw: echo IDS_AUTOMATION_REACHABLE; hostname; date
+      register: online
+      changed_when: false
+
+    - name: Show target version info
+      raw: "lsb_release -d 2>/dev/null; python --version 2>&1; evemu-describe 2>/dev/null | head -0; suricata --build-info 2>/dev/null | head -1"
+      register: verinfo
+      changed_when: false
+
+    - name: Compute local thesis.rules checksum
+      local_action: command md5sum {{ thesis_rules_src }}
+      register: local_rules_md5
+      changed_when: false
+
+    - name: Read copy of thesis.rules to deploy (base64)
+      local_action: command bash -c "base64 -w0 {{ thesis_rules_src }}"
+      register: rules_b64
+      changed_when: false
+
+    - name: Deploy thesis.rules (idempotent, skip if same md5)
+      raw: |
+        want={{ local_rules_md5.stdout.split()[0] }}
+        got=$(md5sum /etc/suricata/rules/thesis.rules | awk '{print $1}')
+        if [ "$got" != "$want" ]; then
+          echo '{{ rules_b64.stdout }}' | base64 -d > /etc/suricata/rules/thesis.rules
+          echo THESIS_RULES_DEPLOYED
+        else
+          echo THESIS_RULES_UP_TO_DATE
+        fi
+      register: rules_deploy
+      changed_when: "'THESIS_RULES_DEPLOYED' in rules_deploy.stdout"
+
+    - name: Ensure af-packet mirror interface is {{ mirror_interface }}
+      raw: >
+        grep -q "^  - interface: {{ mirror_interface }}" {{ suricata_config }} &&
+        echo AF_PACKET_OK ||
+        echo AF_PACKET_MISSING; grep -A2 "^af-packet:" {{ suricata_config }} | head -3
+      register: afpkt
+      changed_when: false
+
+    - name: Ensure HOME_NET covers lab subnets (trust, wired, DMZ)
+      raw: >
+        grep -q 'HOME_NET: "{{ home_net | regex_escape }}"' {{ suricata_config }} &&
+        echo HOME_NET_OK ||
+        echo HOME_NET_MISMATCH
+      register: homenet
+      changed_when: false
+
+    - name: Validate Suricata configuration (suricata -T)
+      raw: suricata -T -c {{ suricata_config }} 2>&1 | tail -5
+      register: config_test
+      changed_when: false
+
+    - name: Restart Suricata to pick up rule/config changes
+      raw: systemctl restart suricata && echo SURICATA_RESTARTED
+      when: rules_deploy.changed or 'MISMATCH' in homenet.stdout or 'MISSING' in afpkt.stdout
+      register: restart
+      changed_when: "'SURICATA_RESTARTED' in restart.stdout"
+
+    - name: Ensure Suricata service is running
+      raw: systemctl is-active suricata
+      register: suri_active
+      changed_when: false
+
+    - name: Ensure EveBox service is running
+      raw: systemctl is-active evebox
+      register: eve_active
+      changed_when: false
+
+    - name: Start EveBox if not running
+      raw: systemctl start evebox && echo EVEBOX_STARTED
+      when: "'active' not in eve_active.stdout"
+      register: eve_start
+      changed_when: "'EVEBOX_STARTED' in eve_start.stdout"
+
+    - name: Confirm listening ports (5636 EveBox, suricata running)
+      raw: "ss -ltnp | grep -E '5636|suricata' || ss -ltnp | grep 5636"
+      register: ports
+      changed_when: false
+
+    - name: Check alerts flowing into eve.json / fast.log
+      raw: "ls -la /var/log/suricata/eve.json /var/log/suricata/fast.log; echo ===tail===; tail -n 2 /var/log/suricata/fast.log 2>/dev/null"
+      register: logs
+      changed_when: false
+
+    - name: Report automation summary
+      debug:
+        msg:
+          - "IDS server  : {{ inventory_hostname }} ({{ ansible_host }})"
+          - "Suricata    : {{ suri_active.stdout }}"
+          - "EveBox      : {{ eve_active.stdout }}"
+          - "eve.json    : web UI at http://192.168.30.50:5636/ (via WG VPN)"
+          - "Rules       : {{ 'OK (thesis.rules managed)' if 'THESIS_RULES_UP_TO_DATE' in rules_deploy.stdout else 'DEPLOYED - Suricata restarted' }}"

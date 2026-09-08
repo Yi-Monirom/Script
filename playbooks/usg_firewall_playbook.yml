@@ -179,8 +179,7 @@
         quit
         ip route-static 30.30.30.0 255.255.255.240 Tunnel1
         ip route-static 192.168.40.0 255.255.255.0 192.168.30.51
-        nat server wg_dmz_server zone untrust protocol udp global 10.1.1.2 51820 inside 192.168.30.51 51820
-        nat server wg_dmz_server2 zone untrust protocol udp global 20.1.1.2 51820 inside 192.168.30.51 51820
+nat server wg_dmz_server zone untrust protocol udp global 192.168.71.100 51820 inside 192.168.30.51 51820
          security-policy
          rule name VPN_to_Trust
           source-zone untrust
@@ -190,13 +189,19 @@
           destination-address 192.168.20.0 mask 255.255.255.0
           action permit
          quit
-         rule name Untrust_to_DMZ_WireGuard
-          source-zone untrust
-          destination-zone dmz
-          destination-address 192.168.30.51 mask 255.255.255.255
-          service protocol udp destination-port 51820
-          action permit
-         quit
+rule name Untrust_to_DMZ_WireGuard
+           source-zone untrust
+           destination-zone dmz
+           destination-address 192.168.30.51 mask 255.255.255.255
+           service protocol udp destination-port 51820
+           action permit
+          quit
+          rule name Untrust_to_Local_WireGuard
+           source-zone untrust
+           destination-zone local
+           service protocol udp destination-port 51820
+           action permit
+          quit
          rule name DMZ_VPN_to_Trust
           source-zone dmz
           destination-zone trust
@@ -386,7 +391,7 @@
           source-zone dmz
           destination-zone untrust
           source-address 192.168.30.0 mask 255.255.255.0
-          action source-nat easy-ip
+          action source-nat easy-ip/
          quit
          rule name NO_NAT_To_Remote_VPN
           source-zone trust
