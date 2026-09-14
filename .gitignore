@@ -11,7 +11,9 @@ Inventory/group_vars/usg.yml
 Inventory/group_vars/dmz.yml
 playbooks/edge_switches_playbook.yml
 notes.md
+backups/
 
+*.sh
 # Local runtime files
 *.log
 *.tmp
