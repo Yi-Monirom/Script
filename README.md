@@ -1,159 +1,139 @@
-# Network Infrastructure Automation
+# Network Infrastructure Automation Suite
 
-Ansible automation for the Cisco switches and Huawei USG6000V2 firewall HA pair used in this project.
+Enterprise Ansible automation, Expect CLI drivers, and diagnostic tools for Cisco Core/Edge switches, Huawei USG6000V2 Next-Generation Firewall HA Cluster, and DMZ Suricata IDS.
 
-## Project Layout
+---
+
+## 1. Project Directory Layout
 
 ```text
-Inventory/
-  Connection.ini              Ansible inventory and device addresses
-  group_vars/                 Local credentials (ignored by Git)
-  host_vars/                  Per-device configuration
-library/                      Custom Ansible modules
-playbooks/
-  edge_switches_playbook.yml  Configure edge switches only
-  l2_switches_playbook.yml    Configure edge and core switches
-  usg_firewall_playbook.yml   Configure the USG active/standby pair
-usg.exp                      Expect wrapper for Huawei USG SSH sessions
+Script/
+├── .gitignore                       # Protects vault credentials and transient outputs
+├── README.md                        # Master documentation and operations runbook
+├── notes.md                         # Reference architecture notes (IPsec, ACLs)
+├── moniom.cfg                       # [PROTECTED] Golden baseline configuration (542 lines)
+├── firewall_security_policies.conf  # Human-readable reference of USG security policies
+├── usg.exp                          # Interactive Expect wrapper for Huawei USG CLI
+├── sftp_get.exp                     # Expect-driven SFTP configuration retrieval engine
+│
+├── Inventory/                       # Ansible Inventory & Variable Definitions
+│   ├── Connection.ini               # Host definitions, management IPs & group hierarchy
+│   ├── group_vars/                  # Group-level variables and credential overrides
+│   │   ├── credentials.example      # Safe credential template
+│   │   ├── switches.yml             # Cisco switch credentials (git-ignored)
+│   │   ├── usg.yml                  # Huawei USG credentials (git-ignored)
+│   │   └── dmz.yml                  # DMZ Suricata server configuration
+│   └── host_vars/                   # Per-device VLAN, trunk, IP, and LACP configuration
+│       ├── cs1.yml / cs2.yml        # Cisco Core Switch 1 & 2 variables
+│       ├── sw1.yml / sw2.yml        # Cisco Edge Switch 1 & 2 variables
+│       └── usg6000v2.yml / usg6000v2-2.yml # Primary & Standby USG variables
+│
+├── playbooks/                       # Ansible Orchestration Playbooks
+│   ├── usg_firewall_playbook.yml    # USG HA, sub-interfaces, static routes, NAT, security policies
+│   ├── l2_switches_playbook.yml     # Cisco Core & Edge switches (VLANs, Trunks, EtherChannels)
+│   ├── edge_switches_playbook.yml   # Cisco Edge switches only (SW1 & SW2)
+│   ├── ids_suricata_playbook.yml    # DMZ Suricata IDS rules deployment & engine validation
+│   └── test_connection.yml          # Network reachability and AAA authentication tests
+│
+├── library/                         # Custom Ansible Modules
+│   └── usg_ping.py                  # AAA-compatible ping verification module for Huawei USG
+│
+├── files/                           # Static Configuration Assets
+│   └── thesis.rules                 # Custom Suricata IDS signature detection rules
+│
+├── backups/                         # Automated Device Configuration Dumps
+│   ├── switches/                    # Cisco running configuration archives
+│   └── usg/                         # Huawei USG XML/CFG configuration archives
+│
+└── tools/                           # Diagnostic & Operational Utilities
+    ├── scan_ips.sh                  # Multi-threaded parallel subnet scanner (192.168.71.0/24)
+    ├── lab_vpn_setup.sh             # FortiClient routing & socat UDP relay configuration
+    ├── recover_relay.sh             # DMZ relay VM recovery helper
+    └── recover_server.sh            # DMZ WireGuard VPN server recovery helper
 ```
 
-## Requirements
+---
 
-- Linux or macOS
-- Python 3
-- Ansible
-- Ansible collection `cisco.ios`
-- OpenSSH client
-- `expect` for USG automation
-- Network reachability to the management addresses in `Inventory/Connection.ini`
+## 2. Requirements & Prerequisites
 
-Install the Ansible collection:
+### System Packages
+```bash
+sudo apt update
+sudo apt install -y ansible expect openssh-client python3-netaddr
+```
 
+### Ansible Galaxy Collections
 ```bash
 ansible-galaxy collection install cisco.ios
 ```
 
-On Debian or Ubuntu, install the system tools with:
+---
 
-```bash
-sudo apt update
-sudo apt install ansible expect openssh-client
-```
+## 3. Credentials & Inventory Setup
 
-## Credentials
+1. Copy the credentials template:
+   ```bash
+   cp Inventory/group_vars/credentials.example Inventory/group_vars/switches.yml
+   cp Inventory/group_vars/credentials.example Inventory/group_vars/usg.yml
+   ```
+2. Configure credentials in `Inventory/group_vars/switches.yml` and `Inventory/group_vars/usg.yml`. These files are protected by `.gitignore` to prevent credential exposure.
 
-The following files are intentionally ignored by Git:
+3. Verify inventory host mapping:
+   ```bash
+   ansible-inventory -i Inventory/Connection.ini --graph
+   ```
 
-```text
-Inventory/group_vars/switches.yml
-Inventory/group_vars/usg.yml
-```
+---
 
-Create or edit them locally. A safe template is available at `Inventory/group_vars/credentials.example`.
+## 4. Playbooks & Execution Guide
 
-`Inventory/group_vars/switches.yml` must define:
-
-```yaml
-switch_password: "your-switch-password"
-switch_become_password: "your-switch-enable-password"
-```
-
-`Inventory/group_vars/usg.yml` must define:
-
-```yaml
-usg_password: "your-usg-password"
-```
-
-Do not commit real passwords. Rotate any credentials that have previously been stored in Git or shared outside the protected environment.
-
-## Check the Inventory
-
-From this repository directory:
-
-```bash
-ansible-inventory -i Inventory/Connection.ini --graph
-ansible-inventory -i Inventory/Connection.ini --list
-```
-
-The inventory contains these groups:
-
-- `edge_switches`: `sw1` and `sw2`
-- `core_switches`: `cs1` and `cs2`
-- `switches`: all Cisco switches
-- `usg`: both Huawei firewalls
-
-## Validate Before Applying
-
-Syntax-check a playbook before connecting to devices:
-
+### Syntax Check All Playbooks
 ```bash
 ansible-playbook -i Inventory/Connection.ini --syntax-check playbooks/edge_switches_playbook.yml
 ansible-playbook -i Inventory/Connection.ini --syntax-check playbooks/l2_switches_playbook.yml
+ansible-playbook -i Inventory/Connection.ini --syntax-check playbooks/ids_suricata_playbook.yml
+ansible-playbook -i Inventory/Connection.ini --syntax-check playbooks/test_connection.yml
 ansible-playbook -i Inventory/Connection.ini --syntax-check playbooks/usg_firewall_playbook.yml
 ```
 
-Preview Cisco changes where supported:
+### Playbook Descriptions
+
+| Playbook | Target Hosts | Description | Command |
+| :--- | :--- | :--- | :--- |
+| **`usg_firewall_playbook.yml`** | `localhost` $\rightarrow$ USG Cluster | Configures Huawei USG Active/Standby HA, WAN sub-interfaces (GE1/0/1.10, GE1/0/1.20), Trust/DMZ interfaces, static routing, NAT Server (`10.1.1.2:51820`), and all security policies. | `ansible-playbook -i Inventory/Connection.ini playbooks/usg_firewall_playbook.yml` |
+| **`l2_switches_playbook.yml`** | `switches` (`cs1, cs2, sw1, sw2`) | Configures VLANs 10, 20, 30, 40, 71, 100, 200, 300, 802.1Q trunks, LACP Port-Channels (Po1, Po2, Po12, Po34), SVI management, and saves startup configs. | `ansible-playbook -i Inventory/Connection.ini playbooks/l2_switches_playbook.yml` |
+| **`edge_switches_playbook.yml`** | `edge_switches` (`sw1, sw2`) | Targets only WAN Edge switches for fast convergence testing. | `ansible-playbook -i Inventory/Connection.ini playbooks/edge_switches_playbook.yml` |
+| **`ids_suricata_playbook.yml`** | `dmz` (Suricata VM) | Idempotently pushes `files/thesis.rules` (MD5 verification) to `/etc/suricata/rules/thesis.rules` and reloads the engine. | `ansible-playbook -i Inventory/Connection.ini playbooks/ids_suricata_playbook.yml` |
+| **`test_connection.yml`** | `all` | Verifies end-to-end SSH and AAA connectivity. | `ansible-playbook -i Inventory/Connection.ini playbooks/test_connection.yml` |
+
+---
+
+## 5. Expect CLI Drivers (`usg.exp` & `sftp_get.exp`)
+
+The Huawei USG6000V2 utilizes an interactive AAA authentication prompt. The Expect scripts provide seamless automation:
 
 ```bash
-ansible-playbook -i Inventory/Connection.ini --check playbooks/l2_switches_playbook.yml
+# Execute a single view command
+USG_HOST=192.168.71.100 USG_USER=admin USG_PASS='password' ./usg.exp 'display hrp state'
+
+# Pull running configuration backup via SFTP
+./sftp_get.exp
 ```
 
-## Run the Cisco Switch Playbooks
+---
 
-Configure only the edge switches:
+## 6. Operational & Diagnostic Tools (`tools/`)
 
-```bash
-ansible-playbook -i Inventory/Connection.ini playbooks/edge_switches_playbook.yml
-```
+| Script | Purpose | Usage Example |
+| :--- | :--- | :--- |
+| **`tools/scan_ips.sh`** | Parallel multi-threaded IP scanner for `192.168.71.0/24`. Detects active hosts and identifies consecutive free blocks. | `./tools/scan_ips.sh` *(or `./tools/scan_ips.sh 100 110`)* |
+| **`tools/lab_vpn_setup.sh`** | Configures local routes and `socat` UDP relay when connecting through FortiClient VPN. | `sudo ./tools/lab_vpn_setup.sh` |
+| **`tools/recover_relay.sh`** | Re-establishes DMZ UDP relay routing on the test VM. | `./tools/recover_relay.sh` |
+| **`tools/recover_server.sh`** | Restores WireGuard server configuration on the DMZ node. | `./tools/recover_server.sh` |
 
-Configure all Cisco switches, including the core switches:
+---
 
-```bash
-ansible-playbook -i Inventory/Connection.ini playbooks/l2_switches_playbook.yml
-```
+## 7. Configuration Safety Guidelines
 
-The switch playbooks configure VLANs, trunk interfaces, access ports, EtherChannel, and save modified running configurations to startup configuration.
-
-## Run the USG HA Playbook
-
-The USG playbook uses `usg.exp` and runs from the control machine. Confirm SSH access first:
-
-```bash
-USG_HOST=192.168.71.100 USG_USER=admin USG_PASS='your-usg-password' \
-  ./usg.exp 'display version'
-```
-
-Make the wrapper executable if necessary:
-
-```bash
-chmod +x usg.exp
-```
-
-The default playbook setting is `bootstrap_standby: false`. For the first HA deployment, edit that variable in `playbooks/usg_firewall_playbook.yml` to `true`, run the playbook once, and then set it back to `false`:
-
-```bash
-ansible-playbook -i Inventory/Connection.ini playbooks/usg_firewall_playbook.yml
-```
-
-The intended order is:
-
-1. Apply the full configuration to the active firewall.
-2. Bootstrap the standby heartbeat and HRP configuration on the first deployment.
-3. Enable HRP on the active firewall.
-4. Verify HRP state on both firewalls.
-
-The management SSH configuration is expected to already exist and is not changed by this playbook.
-
-## Troubleshooting
-
-- `Host key` or SSH failures: verify management IPs, credentials, SSH algorithms, and network reachability.
-- `cisco.ios` module not found: run `ansible-galaxy collection install cisco.ios`.
-- `expect: command not found`: install the `expect` package.
-- USG login timeout: test `./usg.exp 'display version'` directly and verify `USG_HOST`, `USG_USER`, and `USG_PASS`.
-- Do not run the USG playbook with `bootstrap_standby: true` after the standby has already entered HRP standby mode unless the device state has been intentionally reset.
-
-## Safety
-
-These playbooks change live network devices. Review the inventory and host variables, verify the topology, and test against a lab device before applying changes to production equipment.
-
-Script/playbooks/l2_switches_playbook.yml
+- **Golden Baseline:** `moniom.cfg` is the verified golden reference configuration. Do not modify or overwrite this file.
+- **Automated Backups:** Playbooks automatically export timestamped backups into `backups/switches/` and `backups/usg/` before applying any state changes.
