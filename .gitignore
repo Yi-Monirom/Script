@@ -20,5 +20,6 @@ backups/
 .env
 .env.*
 .vault_pass
+keys/
 
 moniom.cfg
