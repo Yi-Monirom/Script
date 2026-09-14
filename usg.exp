@@ -6,6 +6,7 @@
 # Usage:
 #   ./usg.exp [command]                 # run one user-view command
 #   ./usg.exp --config                  # apply config commands from USG_CMDS
+#   ./usg.exp --backup                  # dump running config to USG_BACKUP_FILE
 #   ./usg.exp --save                    # just save the running config
 #
 # Environment:
@@ -15,6 +16,7 @@
 #   USG_PASS   (default M@n!r0m@123)
 #   USG_TIMEOUT(default 30)
 #   USG_CMDS   (newline-separated config commands for --config mode)
+#   USG_BACKUP_FILE (target file for --backup mode)
 #
 # Prompts are matched with regexes so a changed sysname does not break
 # the session. Paging is disabled with `screen-length 0 temporary`.
@@ -43,6 +45,8 @@ set mode "command"
 if {$argc > 0} {
     if {$argv eq "--config"} {
         set mode "config"
+    } elseif {$argv eq "--backup"} {
+        set mode "backup"
     } elseif {$argv eq "--save"} {
         set mode "save"
     } else {
@@ -146,22 +150,99 @@ proc if_has_any_ip {if_ip_map if} {
     return [info exists m($if)]
 }
 
-if {$mode eq "command"} {
-    # ---- run a single user-view command ----
-    send -- "$command\r"
-    expect {
-        -re "$user_prompt" {
-            set output $expect_out(buffer)
-        }
-        timeout { fail "command timed out after $timeout s: $command" }
-        eof    { fail "connection closed while waiting for command output" }
+# ---- single-shot actions: normal command or full-config backup ----
+# Both share ONE capture path (send command, wait for the trailing prompt) --
+# empirically only this path returns the full stream reliably.
+if {$mode eq "command" || $mode eq "backup"} {
+    if {$mode eq "command"} {
+        set out_cmd $command
+    } else {
+        set out_cmd "display current-configuration"
+        # keep the config stream off stdout while raw-reading it below
+        log_user 0
     }
-    regsub -all -- "$command" $output "" output
-    regsub -all -- "\r" $output "" output
-    set output [string trim $output]
-    puts "\n===== COMMAND OUTPUT ($command) ====="
-    puts "$output"
-    puts "======================================"
+    send -- "$out_cmd\r"
+    if {$mode eq "backup"} {
+        # Raw read-loop capture. `expect` re-scans the buffer on every new chunk and
+        # discards the already-checked (gate=no) front, which truncates large outputs
+        # to their tail. Reading the channel directly avoids that entirely.
+        set output ""
+        set last_data [clock seconds]
+        fconfigure $spawn_id -blocking 0
+        while {1} {
+            set chunk [read $spawn_id]
+            if {[string length $chunk] > 0} {
+                append output $chunk
+                set last_data [clock seconds]
+            }
+            if {[regexp {return\r\nHRP_M<USG6000V2[^>]*>} $output]} { break }
+            if {[expr {[clock seconds] - $last_data}] > 8} { break }
+            sleep 0.05
+        }
+        fconfigure $spawn_id -blocking 1
+    } else {
+        expect {
+            -re "$user_prompt" {
+                set output $expect_out(buffer)
+            }
+            timeout { fail "command timed out after $timeout s: $out_cmd" }
+            eof    { fail "connection closed while waiting for $out_cmd" }
+        }
+    }
+
+    if {$mode eq "backup"} {
+        # ---- --backup: validate completeness, then write the filtered config ----
+        set bkfile [expr {[info exists env(USG_BACKUP_FILE)] ? $env(USG_BACKUP_FILE) : ""}]
+        set complete [expr {[regexp -nocase {sysname[ \t]+USG6000V2} $output] \
+                            && [regexp {return\r?\n} $output] \
+                            && [string length $output] > 10000}]
+        if {!$complete} {
+            set num [expr {[info exists env(USG_RETRY)] ? $env(USG_RETRY) : 0}]
+            if {$num < 5} {
+                set env(USG_RETRY) [expr {$num + 1}]
+                puts stderr "backup incomplete (len [string length $output]); re-running (attempt [expr {$num + 1}])"
+                exit [exec expect $argv0 --backup]
+            }
+            fail "backup output incomplete after 5 attempts (len [string length $output])"
+        }
+        set cfg_lines [list]
+        foreach ln [split $output "\n"] {
+            set t [string trim $ln]
+            if {$t eq ""} { continue }
+            if {[string match "*display current-configuration*" $t] || [string match "*quit*" $t]} { continue }
+            if {[regexp {^Connection to .* closed} $t]} { continue }
+            if {[regexp {^HRP_[MS]<USG6000V2} $t] || [regexp {^<USG6000V2[^>]*>} $t]} { continue }
+            if {[regexp {^20[0-9]{2}-[0-9]{2}-[0-9]{2} [0-9][0-9]:} $t]} { continue }
+            if {[string match "*User Authentication*" $t] || [regexp -nocase {^\(?[a-z0-9_.-]*\)? *password:} $t]} { continue }
+            if {[string match "*Copyright*" $t] || [string match "*rights reserved*" $t] \
+                || [string match "*decompil*" $t] || [string match "*consent*" $t] \
+                || [string match "*screen-length*" $t] || [string match "*current login time*" $t] \
+                || [string match "*current VTY*" $t] || [string match "*The max*" $t] \
+                || [regexp {^[*]+} $t] || [regexp {^[[:space:]]*Warning:} $t]} { continue }
+            lappend cfg_lines $t
+        }
+        if {$bkfile ne ""} {
+            if {[catch {set f [open $bkfile w]} err]} {
+                fail "cannot open backup file $bkfile: $err"
+            }
+            puts $f [join $cfg_lines "\n"]
+            close $f
+            puts "===== BACKUP WRITTEN: $bkfile ([llength $cfg_lines] lines) ====="
+        } else {
+            puts [join $cfg_lines "\n"]
+        }
+        log_user 0
+    } else {
+        # ---- normal command output ----
+        regsub -all -- "$out_cmd" $output "" output
+        regsub -all -- "\r" $output "" output
+        set output [string trim $output]
+        puts "\n===== COMMAND OUTPUT ($out_cmd) ====="
+        puts "$output"
+        puts "======================================"
+        log_user 0
+    }
+
     send -- "quit\r"
     expect eof
     exit 0

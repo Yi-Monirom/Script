@@ -1,0 +1,78 @@
+#!/usr/bin/expect -f
+#
+# Pull the USG saved configuration (moniom.cfg) over SFTP.
+# The USG SSH server only accepts interactive (TTY) password auth, so this
+# drives the sftp client with expect (same as usg.exp).
+#
+# Environment:
+#   SFTP_HOST        (default 192.168.71.100)
+#   SFTP_USER        (default admin)
+#   SFTP_PASS        (required)
+#   SFTP_SRC         (default moniom.cfg)
+#   SFTP_DEST        (local target path, required)
+
+set timeout 60
+
+proc fail {msg} {
+    puts stderr "ERROR: $msg"
+    exit 1
+}
+
+set host [expr {[info exists env(SFTP_HOST)] ? $env(SFTP_HOST) : "192.168.71.100"}]
+set user [expr {[info exists env(SFTP_USER)] ? $env(SFTP_USER) : "admin"}]
+if {![info exists env(SFTP_PASS)]} { fail "SFTP_PASS not set" }
+set pass $env(SFTP_PASS)
+set src  [expr {[info exists env(SFTP_SRC)]  ? $env(SFTP_SRC)  : "moniom.cfg"}]
+if {![info exists env(SFTP_DEST)]} { fail "SFTP_DEST not set" }
+set dest $env(SFTP_DEST)
+
+spawn sftp \
+    -o KexAlgorithms=+diffie-hellman-group14-sha1 \
+    -o HostKeyAlgorithms=+ssh-rsa \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o NumberOfPasswordPrompts=1 \
+    $user@$host
+
+expect {
+    -re {[Pp]assword:} {
+        send -- "$pass\r"
+    }
+    -re {Connection closed} { fail "connection closed before password prompt" }
+    -re {Permission denied} { fail "authentication failed" }
+    timeout { fail "timed out waiting for password prompt" }
+    eof    { fail "connection closed waiting for password prompt" }
+}
+
+expect {
+    -re {sftp>} {
+        send -- "get $src $dest\r"
+    }
+    -re {Permission denied} { fail "authentication failed" }
+    -re {Connection closed} { fail "connection closed after password" }
+    timeout { fail "timed out waiting for sftp prompt" }
+    eof    { fail "connection closed waiting for sftp prompt" }
+}
+
+expect {
+    -re {Fetching.*to.*} {
+        # transfer in progress; wait for the next prompt
+        exp_continue
+    }
+    -re {sftp>} {
+        send -- "bye\r"
+    }
+    -re {No such file} { fail "no such remote file: $src" }
+    -re {Permission denied} { fail "sftp denied fetching $src" }
+    -re {Connection closed} { fail "connection closed during fetch" }
+    timeout { fail "timed out during fetch of $src" }
+    eof    { fail "connection closed during fetch" }
+}
+
+expect eof
+
+if {![file exists $dest]} { fail "local file not written: $dest" }
+if {![file size $dest]}   { fail "local file is empty: $dest" }
+
+puts "===== BACKUP WRITTEN: $dest ====="
+exit 0
