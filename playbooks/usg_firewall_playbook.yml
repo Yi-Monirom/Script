@@ -9,8 +9,16 @@
 # cables stay plugged but are UNCONFIGURED spare/backup paths. Redundancy
 # comes from the HA pair + the core-switch L2 ring (Po1):
 #
-#   Primary  (active):  GE1/0/1 (untrust) -> SW1, GE1/0/4 (trust) -> CS1
-#   Secondary(standby): GE1/0/1 (untrust) -> SW2, GE1/0/4 (trust) -> CS2
+#   Primary  (active):  GE1/0/1 (untrust) -> SW1, Eth-Trunk1 (GE1/0/4+GE1/0/0) -> CS1
+#   Secondary(standby): GE1/0/1 (untrust) -> SW2, Eth-Trunk1 (GE1/0/4+GE1/0/0) -> CS2
+#
+# LAN/Core link aggregation (LAG):
+#   - USG Eth-Trunk1 (members GE1/0/4 + GE1/0/0, LACP) <-> core switch Port-channel5
+#     (members GE0/0 + GE1/3, "mode active"). VLAN sub-interfaces 100/200/300 live
+#     on Eth-Trunk1.* and are mirrored to standby via HRP.
+#   - One-time migration (from the old single GE1/0/4.* uplink) is done by the
+#     `undo interface GigabitEthernet1/0/4.*` lines kept at the top of the command
+#     block. They are no-ops on subsequent runs.
 #
 # Full config (sub-interfaces, zones, OSPF, policies, heartbeat) is applied
 # on the ACTIVE firewall and mirrored to STANDBY via HRP. The standby only
@@ -20,7 +28,22 @@
 #   1. ACTIVE  gets full config (sub-interfaces, zones, OSPF, policies,
 #      heartbeat link) but HRP is NOT enabled yet.
 #   2. STANDBY gets sysname, heartbeat link, HRP interface + hrp enable.
-#   3. ACTIVE  gets hrp enable last -> negotiation -> sync to standby.
+#   3. ACTIVE  gets hrp enable + explicit `hrp device active` -> sync to standby.
+#
+# Roles are pinned explicitly: PRIMARY = `hrp device active` (HRP master),
+# SECONDARY = `hrp device standby`. Do NOT rely on default priority negotiation
+# here: with equal default priority, the device with the higher heartbeat IP
+# (Secondary 172.16.0.2) wins the master role, leaving Primary as standby.
+# The `bootstrap_standby` flag must be true on the first deployment so the
+# standby is pinned to standby BEFORE the active brings HRP up.
+#
+# Failover/failback is FULLY AUTOMATIC:
+#   - Both up           -> PRIMARY is active (pinned master).
+#   - PRIMARY fails     -> SECONDARY takes over automatically on heartbeat
+#                         loss (seconds), traffic follows via OSPF cost adjust.
+#   - PRIMARY recovers  -> `hrp preempt delay 60` returns the active role to
+#                         the primary automatically after the delay.
+# No manual intervention or script is needed.
 #
 # The management interface / SSH (vty+aaa) are already configured manually
 # and are intentionally NOT touched here.
@@ -47,21 +70,34 @@
     # deployment; afterwards the standby is in HRP standby state and rejects
     # local config changes (config now flows from active via HRP mirror).
     bootstrap_standby: false
+    # Set to true to ALSO back up / read the STANDBY node directly. The
+    # standby is an HRP config mirror of the active, and `save` on the active
+    # synchronises the startup config to the peer device, so a separate
+    # standby backup is redundant by default (active-only is preferred).
+    standby_managed: false
 
-    # NOTE: no '#' comments allowed inside these command strings — usg.exp
+    # =========================================================================
+    # ACTIVE FIREWALL - full configuration
+    # =========================================================================
+    #
+    # NOTE: no '#' comments allowed inside these command strings -- usg.exp
     # sends every non-empty line to the firewall CLI verbatim.
     #
-    # active_main_cmds notes:
+    # Notes:
     #   - `dhcp enable` must precede `dhcp select interface` on GE1/0/4.100
     #     (VLAN 100 Admin pool: 192.168.10.0/24, GW 192.168.10.1, DNS 8.8.8.8).
     #   - `undo ospf mtu-enable` on the untrust sub-interfaces prevents OSPF
     #     peers sticking in ExStart (USG advertises MTU 0 vs Cisco 1500).
     #   - static default route via ISP-1 is the safety net for the default
     #     route that OSPF should install from the ISPs' ASE LSA.
+#   - NAT server (WireGuard): inbound UDP from behind the ISPs is DNAT'd
+#     to the DMZ WG server 192.168.30.51:443.
+    #   - L2TP dial-in was REMOVED (unused; WireGuard is the remote-access VPN).
+    #   - A pre-run backup of both firewalls' running configs is taken by this
+    #     playbook before any change (see the "Backup" tasks below).
     active_main_cmds: |-
       sysname {{ hostvars[active_host].usg_sysname }}
-      l2tp enable
-      l2tp domain suffix-separator @
+      undo ipsec sha2 compatible enable
       interface {{ hostvars[active_host].hrp_interface }}
        ip address {{ hostvars[active_host].hrp_local_ip }} {{ hostvars[active_host].hrp_netmask }}
        undo shutdown
@@ -75,27 +111,40 @@
       dns resolve
       dns server 8.8.8.8
       dns server 1.1.1.1
-       interface GigabitEthernet1/0/1.10
-        vlan-type dot1q 10
-        undo ip address
-        ip address 10.1.1.2 255.255.255.0
-        service-manage enable
-        service-manage ssh permit
-        service-manage ping permit
-        undo ospf mtu-enable
-        undo shutdown
-        quit
-       interface GigabitEthernet1/0/1.20
-        vlan-type dot1q 20
-        undo ip address
-        ip address 20.1.1.2 255.255.255.0
-        service-manage enable
-        service-manage ssh permit
-        service-manage ping permit
-        undo ospf mtu-enable
-        undo shutdown
-        quit
-      interface GigabitEthernet1/0/4.100
+      undo interface GigabitEthernet1/0/4.100
+      undo interface GigabitEthernet1/0/4.200
+      undo interface GigabitEthernet1/0/4.300
+      interface Eth-Trunk1
+       description LAG_to_Core_Switch
+       mode lacp
+       quit
+      interface GigabitEthernet1/0/4
+       eth-trunk 1
+       quit
+      interface GigabitEthernet1/0/0
+       eth-trunk 1
+       quit
+      interface GigabitEthernet1/0/1.10
+       vlan-type dot1q 10
+       undo ip address
+       ip address 10.1.1.2 255.255.255.0
+       service-manage enable
+       service-manage ssh permit
+       service-manage ping permit
+       undo ospf mtu-enable
+       undo shutdown
+       quit
+      interface GigabitEthernet1/0/1.20
+       vlan-type dot1q 20
+       undo ip address
+       ip address 20.1.1.2 255.255.255.0
+       service-manage enable
+       service-manage ssh permit
+       service-manage ping permit
+       undo ospf mtu-enable
+       undo shutdown
+       quit
+      interface Eth-Trunk1.100
        vlan-type dot1q 100
        undo ip address
        ip address 192.168.10.1 255.255.255.0
@@ -107,7 +156,7 @@
        dhcp server lease day 1
        undo shutdown
        quit
-      interface GigabitEthernet1/0/4.200
+      interface Eth-Trunk1.200
        vlan-type dot1q 200
        undo ip address
        ip address 192.168.20.1 255.255.255.0
@@ -115,7 +164,7 @@
        service-manage ping permit
        undo shutdown
        quit
-      interface GigabitEthernet1/0/4.300
+      interface Eth-Trunk1.300
        vlan-type dot1q 300
        undo ip address
        ip address 192.168.30.1 255.255.255.0
@@ -123,283 +172,261 @@
        service-manage ping permit
        undo shutdown
        quit
-      interface Virtual-Template1
-       ppp authentication-mode chap
-       remote address 192.168.40.10
-       ip address 192.168.40.1 255.255.255.0
-       quit
-      ip pool vpn_l2tp_pool
-       section 0 192.168.40.10 192.168.40.50
-       quit
-      l2tp-group 1
-       mandatory-chap
-       undo tunnel authentication
-       allow l2tp virtual-template 1 remote monirom-Legion-5
-       quit
       firewall zone untrust
        add interface GigabitEthernet1/0/1.10
        add interface GigabitEthernet1/0/1.20
        quit
       firewall zone trust
-       add interface GigabitEthernet1/0/4.100
-       add interface GigabitEthernet1/0/4.200
-       add interface Virtual-Template1
+       add interface Eth-Trunk1.100
+       add interface Eth-Trunk1.200
        quit
       firewall zone dmz
-       add interface GigabitEthernet1/0/4.300
+       add interface Eth-Trunk1.300
        quit
-       ospf 1 router-id 172.16.0.1
-        area 0.0.0.0
-         network 10.1.1.0 0.0.0.255
-         network 20.1.1.0 0.0.0.255
-         network 192.168.10.0 0.0.0.255
-         network 192.168.20.0 0.0.0.255
-         network 192.168.30.0 0.0.0.255
-         quit
-        quit
-       ip-link check enable
-       ip-link name isp1_link
-        destination 10.1.1.1 interface GigabitEthernet1/0/1.10
-        quit
-       ip-link name isp2_link
-        destination 20.1.1.1 interface GigabitEthernet1/0/1.20
-        quit
-       undo ip route-static 0.0.0.0 0.0.0.0 10.1.1.1
-       undo ip route-static 0.0.0.0 0.0.0.0 20.1.1.1
-       ip route-static 0.0.0.0 0.0.0.0 10.1.1.1 preference 60 track ip-link isp1_link
-       ip route-static 0.0.0.0 0.0.0.0 20.1.1.1 preference 60 track ip-link isp2_link
-       interface Tunnel1
-        ip address 10.99.0.1 255.255.255.252
-        tunnel-protocol gre
-        source 10.1.1.2
-        destination {{ ipsec_isp1_peer_ip }}
-        quit
-       firewall zone untrust
-        add interface Tunnel1
-        quit
-        ip route-static 30.30.30.0 255.255.255.240 Tunnel1
-        ip route-static 192.168.40.0 255.255.255.0 192.168.30.51
-nat server wg_dmz_server zone untrust protocol udp global 192.168.71.100 51820 inside 192.168.30.51 51820
-         security-policy
-         rule name VPN_to_Trust
-          source-zone untrust
-          destination-zone trust
-          source-address 30.30.30.0 mask 255.255.255.240
-          destination-address 192.168.10.0 mask 255.255.255.0
-          destination-address 192.168.20.0 mask 255.255.255.0
-          action permit
-         quit
-rule name Untrust_to_DMZ_WireGuard
-           source-zone untrust
-           destination-zone dmz
-           destination-address 192.168.30.51 mask 255.255.255.255
-           service protocol udp destination-port 51820
-           action permit
-          quit
-          rule name Untrust_to_Local_WireGuard
-           source-zone untrust
-           destination-zone local
-           service protocol udp destination-port 51820
-           action permit
-          quit
-         rule name DMZ_VPN_to_Trust
-          source-zone dmz
-          destination-zone trust
-          source-address 192.168.30.51 mask 255.255.255.255
-          source-address 192.168.40.0 mask 255.255.255.0
-          destination-address 192.168.10.0 mask 255.255.255.0
-          destination-address 192.168.20.0 mask 255.255.255.0
-          action permit
-         quit
-         rule name Local_to_Untrust
-         source-zone local
-         destination-zone untrust
-         service dns
-         service http
-         service https
-         service icmp
-         service ntp
-         action permit
-        quit
-        rule name VPN_to_DMZ
-         source-zone untrust
-         destination-zone dmz
-         source-address 30.30.30.0 mask 255.255.255.240
-         destination-address 192.168.30.0 mask 255.255.255.0
-         action permit
-        quit
-        rule name DMZ_to_Untrust
-         source-zone dmz
-         destination-zone untrust
-         action permit
-        quit
-        rule name Trust_to_Local
-         source-zone trust
-         destination-zone local
-         service dns
-         service icmp
-         action permit
-        quit
-        rule name Untrust_to_Local_VPN
-         source-zone untrust
-         destination-zone local
-         source-address 10.1.1.3 mask 255.255.255.255
-         source-address 10.1.3.3 mask 255.255.255.255
-         source-address 20.1.1.3 mask 255.255.255.255
-         source-address 20.1.3.3 mask 255.255.255.255
-         service gre
-         service esp
-         service ah
-         service protocol udp destination-port 500
-         service protocol udp destination-port 4500
-         action permit
-        quit
-        rule name Untrust_to_Local_L2TP
-         source-zone trust
-         source-zone untrust
-         destination-zone local
-         service l2tp
-         service protocol udp destination-port 1701
-         action permit
-        quit
-        rule name VPN_Clients_to_Trust
-         source-zone trust
-         destination-zone trust
-         source-address 192.168.40.0 mask 255.255.255.0
-         action permit
-        quit
-        rule name L2TP_to_Trust
-         source-zone trust
-         destination-zone trust
-         source-address 192.168.40.0 mask 255.255.255.0
-         action permit
-        quit
-        rule name L2TP_to_Local
-         source-zone trust
-         destination-zone local
-         source-address 192.168.40.0 mask 255.255.255.0
-         action permit
-        quit
-        rule name Local_to_Trust
-         source-zone local
-         destination-zone trust
-         action permit
-        quit
-        rule name Untrust_to_Local_ICMP
-         source-zone untrust
-         destination-zone local
-         service icmp
-         action permit
-        quit
-        rule name SSH_to_Local
-         destination-zone local
-         source-address 192.168.10.0 mask 255.255.255.0
-         source-address 192.168.71.0 mask 255.255.255.0
-         service https
-         service ssh
-         action permit
-        quit
-        rule name Deny_SSH_to_Local
-         destination-zone local
-         service https
-         service ssh
-         service telnet
-         action deny
-        quit
-        rule name Block_Staff_to_Admin
-         source-zone trust
-         destination-zone trust
-         source-address 192.168.20.0 mask 255.255.255.0
-         destination-address 192.168.10.0 mask 255.255.255.0
-         action deny
-        quit
-        rule name Admin_to_DMZ_Full
-         source-zone trust
-         destination-zone dmz
-         source-address 192.168.10.0 mask 255.255.255.0
-         destination-address 192.168.30.0 mask 255.255.255.0
-         action permit
-        quit
-        rule name Staff_to_DMZ_WebOnly
-         source-zone trust
-         destination-zone dmz
-         source-address 192.168.20.0 mask 255.255.255.0
-         destination-address 192.168.30.0 mask 255.255.255.0
-         service http
-         service https
-         service icmp
-         action permit
-        quit
-        rule name Block_Staff_to_DMZ_Backend
-         source-zone trust
-         destination-zone dmz
-         source-address 192.168.20.0 mask 255.255.255.0
-         destination-address 192.168.30.0 mask 255.255.255.0
-         action deny
-        quit
-        rule name Admin_to_Internet
-         source-zone trust
-         destination-zone untrust
-         source-address 192.168.10.0 mask 255.255.255.0
-         action permit
-        quit
-        rule name Staff_to_Internet_Productivity
-         source-zone trust
-         destination-zone untrust
-         source-address 192.168.20.0 mask 255.255.255.0
-         service dns
-         service http
-         service https
-         service icmp
-         action permit
-        quit
-        rule name Block_Staff_Other_Internet
-         source-zone trust
-         destination-zone untrust
-         source-address 192.168.20.0 mask 255.255.255.0
-         action deny
-        quit
-        rule name Local_to_Untrust_OSPF
-         source-zone local
-         destination-zone untrust
-         service gre
-         service ospf
-         action permit
-        quit
-        rule name Untrust_to_Local_OSPF
-         source-zone untrust
-         destination-zone local
-         service gre
-         service ospf
-         action permit
+      ospf 1 router-id 172.16.0.1
+       import-route direct
+       area 0.0.0.0
+        network 10.1.1.0 0.0.0.255
+        network 10.99.0.0 0.0.0.3
+        network 20.1.1.0 0.0.0.255
+        network 192.168.10.0 0.0.0.255
+        network 192.168.20.0 0.0.0.255
+        network 192.168.30.0 0.0.0.255
         quit
        quit
-        nat-policy
-         rule name Local_to_Untrust_NAT
-          source-zone local
-          destination-zone untrust
-          action source-nat easy-ip
-         quit
-         rule name Trust_to_Untrust_NAT
-          source-zone trust
-          destination-zone untrust
-          source-address 192.168.10.0 mask 255.255.255.0
-          source-address 192.168.20.0 mask 255.255.255.0
-          action source-nat easy-ip
-         quit
-         rule name DMZ_to_Untrust_NAT
-          source-zone dmz
-          destination-zone untrust
-          source-address 192.168.30.0 mask 255.255.255.0
-          action source-nat easy-ip/
-         quit
-         rule name NO_NAT_To_Remote_VPN
-          source-zone trust
-          destination-zone untrust
-          destination-address 30.30.30.0 mask 255.255.255.240
-          action no-nat
-         quit
+      ip-link check enable
+      ip-link name isp1_link
+       destination 10.1.1.1 interface GigabitEthernet1/0/1.10
        quit
+      ip-link name isp2_link
+       destination 20.1.1.1 interface GigabitEthernet1/0/1.20
+       quit
+      undo ip route-static 0.0.0.0 0.0.0.0 10.1.1.1
+      undo ip route-static 0.0.0.0 0.0.0.0 20.1.1.1
+      ip route-static 0.0.0.0 0.0.0.0 10.1.1.1 preference 60 track ip-link isp1_link
+      ip route-static 0.0.0.0 0.0.0.0 20.1.1.1 preference 60 track ip-link isp2_link
+      ip route-static 10.1.3.0 255.255.255.0 GigabitEthernet1/0/1.10 10.1.1.1 preference 5
+      ip route-static 20.1.3.0 255.255.255.0 GigabitEthernet1/0/1.20 20.1.1.1 preference 5
+      interface Tunnel1
+       ip address 10.99.0.1 255.255.255.252
+       tunnel-protocol gre
+       source 10.1.1.2
+       destination {{ ipsec_isp1_peer_ip }}
+       service-manage ping permit
+       quit
+      firewall zone untrust
+       add interface Tunnel1
+       quit
+      ip route-static 30.0.1.0 255.255.255.0 Tunnel1
+      ip route-static 192.168.40.0 255.255.255.0 192.168.30.51
+      nat server wg_dmz_ext zone untrust protocol udp global 192.168.71.147 443 inside 192.168.30.51 443
+      security-policy
+       rule name VPN_to_Trust
+        source-zone untrust
+        destination-zone trust
+        source-address 30.0.1.0 mask 255.255.255.0
+        destination-address 192.168.10.0 mask 255.255.255.0
+        destination-address 192.168.20.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name Untrust_to_DMZ_WireGuard
+        source-zone untrust
+        destination-zone dmz
+        destination-address 192.168.30.51 mask 255.255.255.255
+        service protocol udp destination-port 51820
+        action permit
+       quit
+       rule name Untrust_to_Local_WireGuard
+        source-zone untrust
+        destination-zone local
+        service protocol udp destination-port 51820
+        action permit
+       quit
+       rule name DMZ_VPN_to_Trust
+        source-zone dmz
+        destination-zone trust
+        source-address 192.168.30.51 mask 255.255.255.255
+        source-address 192.168.40.0 mask 255.255.255.0
+        destination-address 192.168.10.0 mask 255.255.255.0
+        destination-address 192.168.20.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name DMZ_WG_to_Trust
+        source-zone dmz
+        destination-zone trust
+        source-address 192.168.30.51 mask 255.255.255.255
+        service udp
+        action permit
+       quit
+       rule name Local_to_Untrust
+        source-zone local
+        destination-zone untrust
+        service dns
+        service http
+        service https
+        service icmp
+        service ntp
+        action permit
+       quit
+       rule name VPN_to_DMZ
+        source-zone untrust
+        destination-zone dmz
+        source-address 30.30.30.0 mask 255.255.255.240
+        destination-address 192.168.30.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name DMZ_to_Untrust
+        source-zone dmz
+        destination-zone untrust
+        action permit
+       quit
+       rule name Trust_to_Local
+        source-zone trust
+        destination-zone local
+        service dns
+        service icmp
+        action permit
+       quit
+       rule name Untrust_to_Local_VPN
+        source-zone untrust
+        destination-zone local
+        source-address 10.1.1.3 mask 255.255.255.255
+        source-address 10.1.3.3 mask 255.255.255.255
+        source-address 20.1.1.3 mask 255.255.255.255
+        source-address 20.1.3.3 mask 255.255.255.255
+        service gre
+        service esp
+        service ah
+        service protocol udp destination-port 500
+        service protocol udp destination-port 4500
+        action permit
+       quit
+       rule name VPN_Clients_to_Trust
+        source-zone trust
+        destination-zone trust
+        source-address 192.168.40.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name Local_to_Trust
+        source-zone local
+        destination-zone trust
+        action permit
+       quit
+       rule name Untrust_to_Local_ICMP
+        source-zone untrust
+        destination-zone local
+        service icmp
+        action permit
+       quit
+       rule name SSH_to_Local
+        destination-zone local
+        source-address 192.168.10.0 mask 255.255.255.0
+        source-address 192.168.71.0 mask 255.255.255.0
+        service https
+        service ssh
+        action permit
+       quit
+       rule name Deny_SSH_to_Local
+        destination-zone local
+        service https
+        service ssh
+        service telnet
+        action deny
+       quit
+       rule name Block_Staff_to_Admin
+        source-zone trust
+        destination-zone trust
+        source-address 192.168.20.0 mask 255.255.255.0
+        destination-address 192.168.10.0 mask 255.255.255.0
+        action deny
+       quit
+       rule name Admin_to_DMZ_Full
+        source-zone trust
+        destination-zone dmz
+        source-address 192.168.10.0 mask 255.255.255.0
+        destination-address 192.168.30.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name Staff_to_DMZ_WebOnly
+        source-zone trust
+        destination-zone dmz
+        source-address 192.168.20.0 mask 255.255.255.0
+        destination-address 192.168.30.0 mask 255.255.255.0
+        service http
+        service https
+        service icmp
+        action permit
+       quit
+       rule name Block_Staff_to_DMZ_Backend
+        source-zone trust
+        destination-zone dmz
+        source-address 192.168.20.0 mask 255.255.255.0
+        destination-address 192.168.30.0 mask 255.255.255.0
+        action deny
+       quit
+       rule name Admin_to_Internet
+        source-zone trust
+        destination-zone untrust
+        source-address 192.168.10.0 mask 255.255.255.0
+        action permit
+       quit
+       rule name Staff_to_Internet_Productivity
+        source-zone trust
+        destination-zone untrust
+        source-address 192.168.20.0 mask 255.255.255.0
+        service dns
+        service http
+        service https
+        service icmp
+        action permit
+       quit
+       rule name Block_Staff_Other_Internet
+        source-zone trust
+        destination-zone untrust
+        source-address 192.168.20.0 mask 255.255.255.0
+        action deny
+       quit
+       rule name Local_to_Untrust_OSPF
+        source-zone local
+        destination-zone untrust
+        service gre
+        service ospf
+        action permit
+       quit
+       rule name Untrust_to_Local_OSPF
+        source-zone untrust
+        destination-zone local
+        service gre
+        service ospf
+        action permit
+       quit
+      quit
+      nat-policy
+       rule name Local_to_Untrust_NAT
+        source-zone local
+        destination-zone untrust
+        action source-nat easy-ip
+       quit
+       rule name Trust_to_Untrust_NAT
+        source-zone trust
+        destination-zone untrust
+        source-address 192.168.10.0 mask 255.255.255.0
+        source-address 192.168.20.0 mask 255.255.255.0
+        action source-nat easy-ip
+       quit
+       rule name DMZ_to_Untrust_NAT
+        source-zone dmz
+        destination-zone untrust
+        source-address 192.168.30.0 mask 255.255.255.0
+        action source-nat easy-ip
+       quit
+       rule name NO_NAT_To_Remote_VPN
+        source-zone trust
+        destination-zone untrust
+        destination-address 30.30.30.0 mask 255.255.255.240
+        action no-nat
+       quit
+      quit
       update schedule location-sdb weekly Sun 00:08
       update schedule ips-sdb daily 02:00
       update schedule av-sdb daily 02:30
@@ -412,16 +439,10 @@ rule name Untrust_to_DMZ_WireGuard
        undo shutdown
        quit
       aaa
-       service-scheme vpn_l2tp
-        ip-pool vpn_l2tp_pool
-        quit
-       domain default
-        service-scheme vpn_l2tp
-        service-type internetaccess ssl-vpn l2tp ike
-        internet-access mode auto-online
-        reference user current-domain
-        quit
-       manager-user Monirom
+        domain default
+         reference user current-domain
+         quit
+        manager-user Monirom
         password cipher proxy@m@n!r0m
         service-type ssh terminal
         level 15
@@ -440,15 +461,54 @@ rule name Untrust_to_DMZ_WireGuard
        protocol inbound ssh
        quit
 
+    # =========================================================================
+    # GRE-over-IPsec site-to-site VPN to the Huawei USG Branch Office
+    #
+    #   Single tunnel over ISP-1:
+    #     Head office 10.1.1.2  <->  Branch 10.1.3.3 (Huawei USG, same vendor)
+    #
+    # The policy encrypts GRE (Protocol 47) only, so OSPF/ICMP/ip-link probes
+    # on the WAN sub-interface keep working (see "CRITICAL: IPsec Policy Binding"
+    # in note.md). Inner LAN traffic rides GRE Tunnel1 (10.99.0.1/30) and is
+    # routed via OSPF over the tunnel (10.99.0.0/30 in area 0, import-route
+    # direct) with a static fallback to the remote LAN (30.30.30.0/28).
+    # Branch LAN = 30.30.30.0/28.
+    #
+    # IKEv1 Main Mode, PSK. `undo version 2` pins the peer to IKEv1 (the USG
+    # would otherwise try v2 first and the Huawei branch peer must match v1).
+    # =========================================================================
+    # HRP role for the ACTIVE firewall (PRIMARY = HRP master). Runs AFTER the
+    # full config so role election happens from a consistent state. Maps to the
+    # same heartbeat link declared above (GigabitEthernet1/0/3).
+    # `hrp device active` explicitly pins this device as master, so the primary
+    # stays active even though the secondary has the higher heartbeat IP.
+    # Preemption (`hrp preempt`) makes failback AUTOMATIC: when the primary
+    # recovers after a failover, it reclaims the active role after the delay.
+    # OSPF/BGP cost adjustment ensures routers steer traffic back to this
+    # device while it is active (lower cost on the master side).
+    # =========================================================================
     active_hrp_cmds: |-
-       hrp interface GigabitEthernet1/0/3 remote 172.16.0.2
-       hrp mirror config enable
-       hrp mirror session enable
-       hrp track ip-link isp1_link
-       hrp track ip-link isp2_link
-       hrp enable
-       hrp switch active
+      hrp interface GigabitEthernet1/0/3 remote 172.16.0.2
+      hrp mirror config enable
+      hrp mirror session enable
+      hrp track ip-link isp1_link
+      hrp track ip-link isp2_link
+      hrp preempt delay 60
+      hrp adjust ospf-cost enable
+      hrp adjust bgp-cost enable
+      hrp enable
+      hrp device active
 
+    # =========================================================================
+    # STANDBY firewall configuration. One-time bootstrap, guarded by the
+    # `bootstrap_standby` flag. Only sysname, heartbeat link, and HRP EN + role
+    # (`hrp device standby`) are applied locally; everything else mirrors from
+    # the active via HRP. Pinning the standby role is what keeps the secondary
+    # from winning master by default (higher heartbeat IP).
+    # The standby does NOT preempt while the primary is healthy, but it WILL
+    # take over automatically within seconds if the primary goes down (heartbeat
+    # loss), and yields back when the primary preempts after recovery.
+    # =========================================================================
     standby_cmds: |-
       sysname {{ hostvars[standby_host].usg_sysname }}
       interface {{ hostvars[standby_host].hrp_interface }}
@@ -459,24 +519,26 @@ rule name Untrust_to_DMZ_WireGuard
        add interface {{ hostvars[standby_host].hrp_interface }}
        quit
       hrp interface {{ hostvars[standby_host].hrp_interface }} remote {{ hostvars[standby_host].hrp_remote_ip }}
+      hrp preempt delay 60
       hrp enable
-      hrp switch standby
+      hrp device standby
 
-     # =========================================================================
-     # IPsec site-to-site VPN (dual ISP, PSK)
-     #
-     #   Active/standby tunnels:
-     #     Tunnel 1 (primary):  10.1.1.2  <-> 10.1.1.3  (ISP1)
-     #     Tunnel 2 (backup):   20.1.1.2  <-> 20.1.1.3  (ISP2)
-     #
-     # Both tunnels expose the same remote LAN (30.30.30.0/28). The USG uses
-     # the higher-priority tunnel first; if it fails, the second takes over.
-     #
-     # NOTE: certificate generation (pki rsa + self-signed) is included here.
-     # After the first run, export the local cert from each USG and import the
-     # peer's cert on the other side manually. The peer cert is trusted via
-     # peer-id fqdn {{ ipsec_remote_cn }}.
-     # =========================================================================
+    # =========================================================================
+    # GRE-over-IPsec site-to-site VPN to the Huawei USG Branch Office
+    #
+    #   Single tunnel over ISP-1:
+    #     Head office 10.1.1.2  <->  Branch 10.1.3.3 (Huawei USG, same vendor)
+    #
+    # The policy encrypts GRE (Protocol 47) only, so OSPF/ICMP/ip-link probes
+    # on the WAN sub-interface keep working (see "CRITICAL: IPsec Policy Binding"
+    # in note.md). Inner LAN traffic rides GRE Tunnel1 (10.99.0.1/30) and is
+    # routed via OSPF over the tunnel (10.99.0.0/30 in area 0, import-route
+    # direct) with a static fallback to the remote LAN (30.30.30.0/28).
+    # Branch LAN = 30.30.30.0/28.
+    #
+    # IKEv1 Main Mode, PSK. `undo version 2` pins the peer to IKEv1 (the USG
+    # would otherwise try v2 first and the Huawei branch peer must match v1).
+    # =========================================================================
     ipsec_remote_subnet: 30.30.30.0 0.0.0.15
     ipsec_remote_cn: Monirom-USG6000V
     ipsec_isp1_peer_ip: 10.1.3.3
@@ -484,46 +546,94 @@ rule name Untrust_to_DMZ_WireGuard
     ipsec_local_cn: USG6000V2-Primary
 
     active_ipsec_cmds: |-
-       ike proposal 1
-        encryption-algorithm aes-256 aes-128 3des
-        dh group14 group2
-        authentication-algorithm sha2-256 sha1
-        authentication-method pre-share
-        integrity-algorithm hmac-sha2-256
-        prf hmac-sha2-256
-        sa duration 86400
-        quit
-       ike peer peer-vpn1
-        pre-shared-key simple Monirom123
-        ike-proposal 1
-        remote-address {{ ipsec_isp1_peer_ip }}
-        quit
-       ipsec proposal prop-vpn
-        esp authentication-algorithm sha2-256
-        esp encryption-algorithm aes-256
-        quit
-       acl number 3001
-        rule 5 permit gre source 10.1.1.2 0 destination {{ ipsec_isp1_peer_ip }} 0
-        rule 10 permit gre source {{ ipsec_isp1_peer_ip }} 0 destination 10.1.1.2 0
-        quit
-       ipsec policy policy-gre 1 isakmp
-        security acl 3001
-        pfs dh-group14
-        ike-peer peer-vpn1
-        proposal prop-vpn
-        quit
-       # Bind GRE IPsec policy to the primary WAN interface (safe since it only encrypts GRE)
-       interface GigabitEthernet1/0/1.10
-        ipsec policy policy-gre
-        quit
-       interface GigabitEthernet1/0/1.20
-        undo ipsec policy
-        quit
+      ike proposal 1
+       encryption-algorithm aes-256 aes-128 3des
+       dh group14 group2
+       authentication-algorithm sha2-256 sha1
+       authentication-method pre-share
+       integrity-algorithm hmac-sha2-256
+       prf hmac-sha2-256
+       sa duration 86400
+       quit
+      ike peer peer-vpn1
+       pre-shared-key simple ThesisVpn2026
+       undo version 2
+       ike-proposal 1
+       remote-address {{ ipsec_isp1_peer_ip }}
+       quit
+      ipsec proposal prop-vpn
+       esp authentication-algorithm sha2-256
+       esp encryption-algorithm aes-256
+       quit
+      acl number 3001
+       rule 5 permit gre source 10.1.1.2 0 destination {{ ipsec_isp1_peer_ip }} 0
+       rule 10 permit gre source {{ ipsec_isp1_peer_ip }} 0 destination 10.1.1.2 0
+       quit
+      ipsec policy policy-gre 1 isakmp
+       security acl 3001
+       pfs dh-group14
+       ike-peer peer-vpn1
+       proposal prop-vpn
+       quit
+      interface GigabitEthernet1/0/1.10
+       ipsec policy policy-gre
+       quit
+      interface GigabitEthernet1/0/1.20
+       undo ipsec policy
+       quit
 
   tasks:
-    # Push full configuration (L3 sub-interfaces, zones, OSPF, IP-Link, routes,
-    # security policies, SSH management, Monirom admin account, IPsec)
-    # in a single atomic SSH session to avoid connection collisions and write-locks.
+    - name: Create USG backup directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../backups/usg"
+        state: directory
+      run_once: true
+      delegate_to: localhost
+
+    - name: Save ACTIVE USG config (persist + sync to peer via HRP)
+      ansible.builtin.shell: "{{ usg_exp }} --save"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: usg_save_active
+      changed_when: "'CONFIGURATION SAVED' in usg_save_active.stdout"
+      run_once: true
+
+    - name: Backup ACTIVE USG config via SFTP (get moniom.cfg)
+      ansible.builtin.shell: "{{ playbook_dir }}/../sftp_get.exp"
+      environment:
+        SFTP_HOST: "{{ usg_ssh_ip_active }}"
+        SFTP_USER: "{{ usg_mgmt_user }}"
+        SFTP_PASS: "{{ hostvars[active_host].usg_password }}"
+        SFTP_DEST: "{{ playbook_dir }}/../backups/usg/{{ hostvars[active_host].usg_sysname }}_{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}.cfg"
+      register: usg_backup_active
+      changed_when: false
+      run_once: true
+
+    - name: Backup STANDBY USG running-config before changes
+      ansible.builtin.shell: "{{ usg_exp }} --backup"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_standby }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[standby_host].usg_password }}"
+        USG_BACKUP_FILE: "{{ playbook_dir }}/../backups/usg/{{ hostvars[standby_host].usg_sysname }}_{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}.cfg"
+      register: usg_backup_standby
+      changed_when: false
+      run_once: true
+      when: standby_managed | bool
+
+    - name: Show USG backup file path (ACTIVE)
+      ansible.builtin.debug:
+        msg: "ACTIVE : {{ (usg_backup_active.stdout_lines | select('search', 'BACKUP WRITTEN') | list | first) | default('(no BACKUP WRITTEN line)') }}"
+      run_once: true
+
+    - name: Show USG backup file path (STANDBY)
+      ansible.builtin.debug:
+        msg: "STANDBY: {{ (usg_backup_standby.stdout_lines | select('search', 'BACKUP WRITTEN') | list | first) | default('(no BACKUP WRITTEN line)') }}"
+      run_once: true
+      when: standby_managed | bool
+
     - name: Push complete configuration to ACTIVE firewall
       ansible.builtin.shell: "{{ usg_exp }} --config"
       environment:
@@ -543,7 +653,7 @@ rule name Untrust_to_DMZ_WireGuard
     # Bootstraps the STANDBY firewall with its sysname, heartbeat IP, and
     # HRP channel. This is a one-time step (guarded by `bootstrap_standby`).
     # After the first run the standby is in HRP standby state and rejects
-    # local config changes — all config flows from the active via HRP mirror.
+    # local config changes -- all config flows from the active via HRP mirror.
     - name: Push heartbeat + HRP to STANDBY firewall
       ansible.builtin.shell: "{{ usg_exp }} --config"
       environment:
@@ -591,11 +701,13 @@ rule name Untrust_to_DMZ_WireGuard
       register: hrp_state_stdby
       changed_when: false
       run_once: true
+      when: standby_managed | bool
 
     - name: Show STANDBY HRP state
       ansible.builtin.debug:
         var: hrp_state_stdby.stdout_lines
       run_once: true
+      when: standby_managed | bool
 
     - name: Verify OSPF neighbors on ACTIVE
       ansible.builtin.shell: "{{ usg_exp }} display ospf peer"
@@ -613,7 +725,7 @@ rule name Untrust_to_DMZ_WireGuard
       run_once: true
 
     - name: Verify DHCP pool for VLAN 100 on ACTIVE
-      ansible.builtin.shell: "{{ usg_exp }} display ip pool interface GigabitEthernet1/0/4.100 used"
+      ansible.builtin.shell: "{{ usg_exp }} display ip pool interface Eth-Trunk1.100 used"
       environment:
         USG_HOST: "{{ usg_ssh_ip_active }}"
         USG_USER: "{{ usg_mgmt_user }}"
@@ -625,6 +737,21 @@ rule name Untrust_to_DMZ_WireGuard
     - name: Show DHCP pool status
       ansible.builtin.debug:
         var: dhcp_pool.stdout_lines
+      run_once: true
+
+    - name: Verify Eth-Trunk (LAG to core switch) status on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display eth-trunk 1"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: eth_trunk_result
+      changed_when: false
+      run_once: true
+
+    - name: Show Eth-Trunk status
+      ansible.builtin.debug:
+        var: eth_trunk_result.stdout_lines
       run_once: true
 
     # =========================================================================

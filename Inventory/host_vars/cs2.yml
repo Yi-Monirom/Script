@@ -10,13 +10,21 @@ l2_vlans:
 port_channel_id: 1
 port_channel_allowed_vlans: "100,200,300"
 
-edge_trunk_ports:
+# LAG (Port-channel5, LACP "mode active") to the SECONDARY firewall Eth-Trunk1
+# (USG GE1/0/4). GE0/0 was previously a standalone FW trunk; it is now an
+# EtherChannel member. Gi1/3 is the mgmt (VLAN1) uplink and stays untouched.
+# Gi0/3 is a CROSS link to the PRIMARY firewall GE1/0/0 (separate Port-channel 6).
+fw_port_channel_id: 5
+fw_port_channel_allowed_vlans: "100,200,300"
+fw_lag_trunk_ports:
   - name: GigabitEthernet0/0
-    description: Link_to_Secondary_FW
-    allowed_vlans: "100,200,300"
+    description: LAG_to_Secondary_FW_GE1/0/4
+fw_cross_port_channel_id: 6
+fw_cross_lag_trunk_ports:
   - name: GigabitEthernet0/3
-    description: Link_to_Primary_FW
-    allowed_vlans: "100,200,300"
+    description: Cross_LAG_to_Primary_FW_GE1/0/0
+
+edge_trunk_ports:
   - name : GigabitEthernet1/0
     description: Link_to_Access_Switch1
     allowed_vlans: "100"

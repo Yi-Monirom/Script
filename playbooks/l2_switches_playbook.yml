@@ -5,6 +5,26 @@
   connection: network_cli
 
   tasks:
+    - name: Create switch backup directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../backups/switches"
+        state: directory
+      run_once: true
+      delegate_to: localhost
+
+    - name: Backup running-config before changes
+      cisco.ios.ios_command:
+        commands:
+          - show running-config
+      register: backup_running_cfg
+      changed_when: false
+
+    - name: Save switch backup locally
+      delegate_to: localhost
+      ansible.builtin.copy:
+        content: "{{ backup_running_cfg.stdout[0] }}"
+        dest: "{{ playbook_dir }}/../backups/switches/{{ inventory_hostname }}_{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}.cfg"
+
     - name: Set hostname
       ios_config:
         lines:
@@ -41,7 +61,7 @@
       when: port_channel_allowed_vlans is defined
 
     - name: Add member ports to EtherChannel
-      ios_config:
+      cisco.ios.ios_config:
         lines:
           - description {{ item.description }}
           - switchport
@@ -51,6 +71,58 @@
           - no shutdown
         parents: interface {{ item.name }}
       loop: "{{ etherchannel_members }}"
+
+    - name: Configure firewall EtherChannel trunk (Port-channel{{ fw_port_channel_id }})
+      cisco.ios.ios_config:
+        lines:
+          - description LAG_to_Firewall
+          - switchport
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ fw_port_channel_allowed_vlans }}
+          - no shutdown
+        parents: interface Port-channel{{ fw_port_channel_id }}
+      when: fw_lag_trunk_ports is defined
+
+    - name: Add firewall EtherChannel member ports
+      cisco.ios.ios_config:
+        lines:
+          - description {{ item.description }}
+          - switchport
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ fw_port_channel_allowed_vlans }}
+          - channel-group {{ fw_port_channel_id }} mode active
+          - no shutdown
+        parents: interface {{ item.name }}
+      loop: "{{ fw_lag_trunk_ports }}"
+      when: fw_lag_trunk_ports is defined
+
+    - name: Configure firewall cross EtherChannel trunk (Port-channel{{ fw_cross_port_channel_id }})
+      cisco.ios.ios_config:
+        lines:
+          - description Cross_LAG_to_Other_FW
+          - switchport
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ fw_port_channel_allowed_vlans }}
+          - no shutdown
+        parents: interface Port-channel{{ fw_cross_port_channel_id }}
+      when: fw_cross_lag_trunk_ports is defined
+
+    - name: Add firewall cross EtherChannel member ports
+      cisco.ios.ios_config:
+        lines:
+          - description {{ item.description }}
+          - switchport
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ fw_port_channel_allowed_vlans }}
+          - channel-group {{ fw_cross_port_channel_id }} mode active
+          - no shutdown
+        parents: interface {{ item.name }}
+      loop: "{{ fw_cross_lag_trunk_ports }}"
+      when: fw_cross_lag_trunk_ports is defined
 
     - name: Configure trunk ports to firewalls / LAN
       ios_config:
