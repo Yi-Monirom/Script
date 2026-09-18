@@ -394,13 +394,14 @@ foreach cmd $cmds {
             exp_continue
         }
         -re "$conf_prompt" { }
+        -re "$user_prompt" { }
         timeout { fail "command timed out after $timeout s: $cmd" }
         eof    { fail "connection closed during: $cmd" }
     }
 }
 
-# back to user view
-send -- "quit\r"
+# back to user view (send return to safely reach user-view from any depth)
+send -- "return\r"
 expect {
     -re "$user_prompt" { }
     timeout { fail "could not return to user view" }

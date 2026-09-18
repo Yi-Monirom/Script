@@ -111,9 +111,6 @@
       dns resolve
       dns server 8.8.8.8
       dns server 1.1.1.1
-      undo interface GigabitEthernet1/0/4.100
-      undo interface GigabitEthernet1/0/4.200
-      undo interface GigabitEthernet1/0/4.300
       interface Eth-Trunk1
        description LAG_to_Core_Switch
        mode lacp
@@ -345,6 +342,7 @@
         destination-zone dmz
         source-address 192.168.10.0 mask 255.255.255.0
         destination-address 192.168.30.0 mask 255.255.255.0
+        profile ips ips_dmz_profile
         action permit
        quit
        rule name Staff_to_DMZ_WebOnly
@@ -355,6 +353,7 @@
         service http
         service https
         service icmp
+        profile ips ips_dmz_profile
         action permit
        quit
        rule name Block_Staff_to_DMZ_Backend
@@ -401,6 +400,10 @@
         action permit
        quit
       quit
+      profile type ips name ips_dmz_profile
+       signature-set name default
+        quit
+       quit
       nat-policy
        rule name Local_to_Untrust_NAT
         source-zone local
@@ -429,14 +432,12 @@
       quit
       firewall defend port-scan enable
       firewall defend port-scan max-rate 5
-      firewall defend port-scan action drop
       firewall defend ip-sweep enable
       firewall defend ip-sweep max-rate 5
-      firewall defend ip-sweep action drop
       update schedule location-sdb weekly Sun 00:08
       update schedule ips-sdb daily 02:00
       update schedule av-sdb daily 02:30
-      update schedule url-remote-query enable
+      update url-remote-query enable
       interface GigabitEthernet0/0/0
        service-manage enable
        service-manage ssh permit
@@ -466,6 +467,7 @@
        authentication-mode aaa
        protocol inbound ssh
        quit
+
 
     # =========================================================================
     # GRE-over-IPsec site-to-site VPN to the Huawei USG Branch Office

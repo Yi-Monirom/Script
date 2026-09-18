@@ -1,0 +1,190 @@
+---
+# Provision the NEW IDS/IPS server (192.168.30.50, Ubuntu 22.04).
+#
+# This VM is NOT directly reachable from the control node: the playbook
+# connects via an SSH jumphost (Kali 192.168.15.129:2222, user monirom)
+# that has a WireGuard tunnel to the lab LAN. See Inventory/Connection.ini
+# group [idps] for the ProxyJump settings.
+#
+# Steps: verify reachability, ensure static IP + gateway, install Suricata
+# (latest stable from the OISF PPA), point af-packet at the mirror NIC,
+# deploy thesis.rules, install/start EveBox, then verify everything.
+- name: Provision IDS/IPS server - Suricata + EveBox on Ubuntu 22.04
+  hosts: idps
+  gather_facts: no
+
+  vars:
+    expected_ip: 192.168.30.50
+    gateway: 192.168.30.1
+    mirror_interface: ens3
+    home_net: '[192.168.10.0/24,192.168.20.0/24,192.168.30.0/24]'
+    suricata_config: /etc/suricata/suricata.yaml
+    rules_dir: /etc/suricata/rules
+    thesis_rules_src: ../files/thesis.rules
+
+  tasks:
+
+    - name: Verify we reach the server through the Kali jumphost
+      ansible.builtin.raw: hostname && whoami && lsb_release -ds
+      register: reach
+      changed_when: false
+
+    - name: Show OS identity
+      ansible.builtin.debug:
+        var: reach.stdout_lines
+
+    - name: Confirm static IP {{ expected_ip }} is bound
+      ansible.builtin.command: ip -4 -o addr show scope global
+      register: ip_out
+      changed_when: false
+
+    - name: Fail if the static IP is not configured
+      ansible.builtin.assert:
+        that:
+          - expected_ip in ip_out.stdout
+        fail_msg: "{{ expected_ip }} is NOT bound on this host. Configure netplan first."
+        success_msg: "Static IP {{ expected_ip }} is present."
+
+    - name: Ensure gateway route via {{ gateway }}
+      ansible.builtin.command: ip route show default
+      register: route_out
+      changed_when: false
+
+    - name: Warn if default route is missing
+      ansible.builtin.assert:
+        that:
+          - gateway in route_out.stdout
+        fail_msg: "No default route via {{ gateway }}. Check the access switch VLAN 300 uplink."
+        success_msg: "Default route via {{ gateway }} present."
+
+    - name: Gather package facts
+      ansible.builtin.package_facts:
+
+    - name: Enable and start the suricata PPA repo
+      ansible.builtin.apt_repository:
+        repo: ppa:oisf/suricata-stable
+        state: present
+        update_cache: true
+
+    - name: Install Suricata and helpers
+      ansible.builtin.apt:
+        name:
+          - suricata
+          - suricata-update
+          - software-properties-common
+          - curl
+        state: present
+        update_cache: true
+
+    - name: Show installed Suricata version
+      ansible.builtin.raw: suricata --build-info 2>/dev/null | head -5; suricata --version 2>/dev/null
+      register: suri_ver
+      changed_when: false
+
+    - name: Pull latest rulesets (suricata-update)
+      ansible.builtin.command: suricata-update
+      register: rule_update
+      changed_when: "'Writing Rules' in rule_update.stdout"
+
+    - name: Compute local thesis.rules checksum
+      ansible.builtin.command: md5sum {{ thesis_rules_src }}
+      delegate_to: localhost
+      run_once: true
+      register: local_rules_md5
+      changed_when: false
+
+    - name: Read copy of thesis.rules to deploy (base64)
+      ansible.builtin.command: bash -c "base64 -w0 {{ thesis_rules_src }}"
+      delegate_to: localhost
+      run_once: true
+      register: rules_b64
+      changed_when: false
+
+    - name: Ensure thesis.rules directory exists
+      ansible.builtin.file:
+        path: "{{ rules_dir }}"
+        state: directory
+        owner: suricata
+        group: suricata
+
+    - name: Deploy thesis.rules (idempotent, skip if same md5)
+      ansible.builtin.copy:
+        content: "{{ rules_b64.stdout | b64decode }}"
+        dest: "{{ rules_dir }}/thesis.rules"
+        owner: suricata
+        group: suricata
+        mode: '0644'
+        backup: true
+
+    - name: Fetch rules config to reference thesis.rules
+      ansible.builtin.shell: grep -nE "default-rule-path|rule-files|thesis.rules" {{ suricata_config }}
+      register: rc_scan
+      changed_when: false
+
+    - name: Configure af-packet mirror interface {{ mirror_interface }}
+      ansible.builtin.lineinfile:
+        path: "{{ suricata_config }}"
+        regexp: '^\s*- interface:\s+eth\d+'
+        line: "  - interface: {{ mirror_interface }}"
+        firstmatch: true
+
+    - name: Ensure HOME_NET covers lab subnets
+      ansible.builtin.replace:
+        path: "{{ suricata_config }}"
+        regexp: 'HOME_NET:\s*"[^"]*"'
+        replace: 'HOME_NET: "{{ home_net }}"'
+
+    - name: Validate Suricata configuration (suricata -T)
+      ansible.builtin.command: suricata -T -c {{ suricata_config }}
+      register: config_test
+      changed_when: false
+
+    - name: Enable and restart Suricata
+      ansible.builtin.systemd:
+        name: suricata
+        enabled: true
+        state: restarted
+
+    - name: Install EveBox (official installer)
+      ansible.builtin.shell: |
+        if command -v evebox >/dev/null 2>&1; then
+          echo EVEBOX_PRESENT
+        else
+          curl -sSf https://evebox.org/install.sh | sh && echo EVEBOX_INSTALLED
+        fi
+      register: eve_install
+      changed_when: "'EVEBOX_INSTALLED' in eve_install.stdout"
+
+    - name: Show available services for EveBox
+      ansible.builtin.shell: systemctl list-unit-files | grep -i evebox
+      register: eve_units
+      changed_when: false
+
+    - name: Start EveBox web service if present
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: "{{ eve_units.stdout_lines | map('regex_replace', '^(\\S+)\\s.*', '\\1') | select('match', 'evebox') | list | default([]) }}"
+      when: "'evebox' in eve_units.stdout"
+      ignore_errors: true
+
+    - name: Confirm listening ports (5636 EveBox, 22 SSH)
+      ansible.builtin.raw: "ss -ltnp | grep -E '5636|:22 '"
+      register: ports
+      changed_when: false
+
+    - name: Check alerts flowing into eve.json / fast.log
+      ansible.builtin.raw: "ls -la /var/log/suricata/eve.json /var/log/suricata/fast.log 2>/dev/null; echo ===tail===; tail -n 3 /var/log/suricata/fast.log 2>/dev/null"
+      register: logs
+      changed_when: false
+
+    - name: Report provisioning summary
+      ansible.builtin.debug:
+        msg:
+          - "IDS server : {{ inventory_hostname }} ({{ ansible_host }}) via Kali jump"
+          - "OS         : {{ reach.stdout_lines | join(' | ') }}"
+          - "Suricata   : {{ suri_ver.stdout_lines | join(' | ') }}"
+          - "EveBox     : http://192.168.30.50:5636/ (via WG VPN)"
+          - "Rules      : thesis.rules deployed + suricata-update"
+          - "Listening  : {{ ports.stdout_lines | join(' | ') }}"
