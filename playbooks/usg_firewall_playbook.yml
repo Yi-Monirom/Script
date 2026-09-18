@@ -427,6 +427,12 @@
         action no-nat
        quit
       quit
+      firewall defend port-scan enable
+      firewall defend port-scan max-rate 5
+      firewall defend port-scan action drop
+      firewall defend ip-sweep enable
+      firewall defend ip-sweep max-rate 5
+      firewall defend ip-sweep action drop
       update schedule location-sdb weekly Sun 00:08
       update schedule ips-sdb daily 02:00
       update schedule av-sdb daily 02:30
@@ -974,4 +980,19 @@
     - name: Show ACL 2000 Management Restriction
       ansible.builtin.debug:
         var: acl2000_result.stdout_lines
+      run_once: true
+
+    - name: Verify Attack Defense (Port-Scan / IP-Sweep) Status on ACTIVE
+      ansible.builtin.shell: "{{ usg_exp }} display firewall defend port-scan"
+      environment:
+        USG_HOST: "{{ usg_ssh_ip_active }}"
+        USG_USER: "{{ usg_mgmt_user }}"
+        USG_PASS: "{{ hostvars[active_host].usg_password }}"
+      register: defend_status_result
+      changed_when: false
+      run_once: true
+
+    - name: Show Attack Defense Status
+      ansible.builtin.debug:
+        var: defend_status_result.stdout_lines
       run_once: true
