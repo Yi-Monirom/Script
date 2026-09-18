@@ -57,8 +57,9 @@
         fail_msg: "No default route via {{ gateway }}. Check the access switch VLAN 300 uplink."
         success_msg: "Default route via {{ gateway }} present."
 
-    - name: Gather package facts
-      ansible.builtin.package_facts:
+    - name: Ensure APT prerequisite packages are installed
+      ansible.builtin.raw: apt-get update && apt-get install -y software-properties-common python3-apt curl
+      changed_when: false
 
     - name: Enable and start the suricata PPA repo
       ansible.builtin.apt_repository:
@@ -71,8 +72,6 @@
         name:
           - suricata
           - suricata-update
-          - software-properties-common
-          - curl
         state: present
         update_cache: true
 
