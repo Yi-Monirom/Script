@@ -28,6 +28,11 @@ set timeout 30
 # config, which can exceed the ~8KB default) are captured completely.
 match_max 1000000
 
+proc fail {msg} {
+    puts stderr "ERROR: $msg"
+    exit 1
+}
+
 set host   [expr {[info exists env(USG_HOST)]   ? $env(USG_HOST)   : "192.168.71.100"}]
 set port   [expr {[info exists env(USG_PORT)]   ? $env(USG_PORT)   : "22"}]
 set user   [expr {[info exists env(USG_USER)]   ? $env(USG_USER)   : "admin"}]

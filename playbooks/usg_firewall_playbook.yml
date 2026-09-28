@@ -241,7 +241,15 @@
          service protocol udp destination-port 51820
          action permit
         quit
-       rule name DMZ_VPN_to_Trust
+        rule name Relay_to_DMZ_WireGuard
+         source-zone trust
+         destination-zone dmz
+         source-address 192.168.71.149 mask 255.255.255.255
+         destination-address 192.168.30.51 mask 255.255.255.255
+         service protocol udp destination-port 443
+         action permit
+        quit
+        rule name DMZ_VPN_to_Trust
         source-zone dmz
         destination-zone trust
         source-address 192.168.30.51 mask 255.255.255.255
