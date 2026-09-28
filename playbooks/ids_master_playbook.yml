@@ -1,0 +1,152 @@
+---
+# ==============================================================================
+# Playbook: ids_master_playbook.yml
+# Target  : Suricata IDS/IPS Server (192.168.30.50 / idps / ids-server)
+# ProxyJump: Automatically tunnels SSH via Relay VM (192.168.71.149)
+# Purpose : Unified end-to-end automation for Suricata IDS/IPS:
+#           1. Core Suricata engine configuration (/etc/suricata/suricata.yaml)
+#           2. Custom Thesis Detection Rules (/etc/suricata/rules/thesis.rules)
+#           3. Threat Intelligence Feeds (suricata-update: et/open, urlhaus, etc.)
+#           4. EveBox Web UI Dashboard Management (http://192.168.30.50:5636/)
+# ==============================================================================
+- name: Master Unified IDS/IPS Provisioning & Rule Management
+  hosts: idps, ids-server
+  gather_facts: no
+
+  vars:
+    ansible_ssh_common_args: '-o ProxyJump=root@192.168.71.149 -o StrictHostKeyChecking=no'
+    expected_ip: 192.168.30.50
+    gateway: 192.168.30.1
+    mirror_interface: ens3
+    home_net: '[192.168.10.0/24,192.168.20.0/24,192.168.30.0/24]'
+    suricata_config: /etc/suricata/suricata.yaml
+    rules_dir: /etc/suricata/rules
+    thesis_rules_src: ../files/thesis.rules
+    suricata_sources:
+      - et/open
+      - oisf/trafficid
+      - abuse.ch/urlhaus
+      - abuse.ch/sslbl-blacklist
+      - abuse.ch/sslbl-ja3
+      - tgreen/hunting
+
+  tasks:
+
+    # --------------------------------------------------------------------------
+    # 1. Connectivity & Diagnostic Checks
+    # --------------------------------------------------------------------------
+    - name: Verify SSH connectivity via ProxyJump (192.168.71.149)
+      raw: echo IDS_AUTOMATION_REACHABLE; hostname; date
+      register: online
+      changed_when: false
+
+    - name: Display Suricata and OS version info
+      raw: "lsb_release -d 2>/dev/null; python3 --version 2>&1; suricata -V 2>/dev/null | head -1"
+      register: verinfo
+      changed_when: false
+
+    # --------------------------------------------------------------------------
+    # 2. Deploy Custom Thesis Rules (thesis.rules)
+    # --------------------------------------------------------------------------
+    - name: Compute local thesis.rules checksum
+      local_action: command md5sum {{ thesis_rules_src }}
+      register: local_rules_md5
+      changed_when: false
+
+    - name: Encode thesis.rules for deployment
+      local_action: command bash -c "base64 -w0 {{ thesis_rules_src }}"
+      register: rules_b64
+      changed_when: false
+
+    - name: Deploy thesis.rules (idempotent md5 check)
+      raw: |
+        want={{ local_rules_md5.stdout.split()[0] }}
+        got=$(md5sum {{ rules_dir }}/thesis.rules 2>/dev/null | awk '{print $1}')
+        if [ "$got" != "$want" ]; then
+          mkdir -p {{ rules_dir }}
+          echo '{{ rules_b64.stdout }}' | base64 -d > {{ rules_dir }}/thesis.rules
+          echo THESIS_RULES_DEPLOYED
+        else
+          echo THESIS_RULES_UP_TO_DATE
+        fi
+      register: rules_deploy
+      changed_when: "'THESIS_RULES_DEPLOYED' in rules_deploy.stdout"
+
+    # --------------------------------------------------------------------------
+    # 3. Update Threat Feeds via suricata-update
+    # --------------------------------------------------------------------------
+    - name: Enable threat intelligence rule sources
+      raw: |
+        if command -v suricata-update >/dev/null 2>&1; then
+          for src in {{ suricata_sources | join(' ') }}; do
+            suricata-update enable-source $src >/dev/null 2>&1
+          done
+          suricata-update >/dev/null 2>&1 && echo SURICATA_UPDATE_SUCCESS
+        else
+          echo SURICATA_UPDATE_NOT_INSTALLED
+        fi
+      register: update_feeds
+      changed_when: "'SURICATA_UPDATE_SUCCESS' in update_feeds.stdout"
+
+    # --------------------------------------------------------------------------
+    # 4. Configure Suricata (AF-PACKET Mirror Interface & HOME_NET)
+    # --------------------------------------------------------------------------
+    - name: Verify af-packet mirror interface ({{ mirror_interface }})
+      raw: >
+        grep -q "^  - interface: {{ mirror_interface }}" {{ suricata_config }} 2>/dev/null &&
+        echo AF_PACKET_OK || echo AF_PACKET_MISSING
+      register: afpkt
+      changed_when: false
+
+    - name: Verify HOME_NET subnets in suricata.yaml
+      raw: >
+        grep -q 'HOME_NET:' {{ suricata_config }} 2>/dev/null &&
+        echo HOME_NET_OK || echo HOME_NET_MISMATCH
+      register: homenet
+      changed_when: false
+
+    - name: Validate Suricata configuration (suricata -T)
+      raw: suricata -T -c {{ suricata_config }} 2>&1 | tail -5
+      register: config_test
+      changed_when: false
+
+    # --------------------------------------------------------------------------
+    # 5. Service Management & Verification
+    # --------------------------------------------------------------------------
+    - name: Restart Suricata to apply rule and config changes
+      raw: systemctl restart suricata && echo SURICATA_RESTARTED
+      when: rules_deploy.changed or update_feeds.changed
+      register: restart
+      changed_when: "'SURICATA_RESTARTED' in restart.stdout"
+
+    - name: Ensure Suricata service is active
+      raw: systemctl is-active suricata
+      register: suri_active
+      changed_when: false
+
+    - name: Ensure EveBox Web UI service is active
+      raw: systemctl is-active evebox 2>/dev/null || systemctl start evebox
+      register: eve_active
+      changed_when: false
+
+    - name: Verify listening ports (EveBox port 5636)
+      raw: "ss -ltnp | grep 5636 || true"
+      register: ports
+      changed_when: false
+
+    - name: Verify live alert log ingestion (eve.json / fast.log)
+      raw: "ls -la /var/log/suricata/eve.json /var/log/suricata/fast.log 2>/dev/null; echo ===tail===; tail -n 2 /var/log/suricata/fast.log 2>/dev/null"
+      register: logs
+      changed_when: false
+
+    # --------------------------------------------------------------------------
+    # 6. Report Summary
+    # --------------------------------------------------------------------------
+    - name: Report Unified IDS/IPS Status
+      debug:
+        msg:
+          - "Target Host : {{ inventory_hostname }} (192.168.30.50 via ProxyJump 192.168.71.149)"
+          - "Suricata   : {{ suri_active.stdout }}"
+          - "EveBox UI  : {{ eve_active.stdout }} -> http://192.168.30.50:5636/"
+          - "Thesis Rules: {{ 'UP TO DATE' if 'THESIS_RULES_UP_TO_DATE' in rules_deploy.stdout else 'UPDATED' }}"
+          - "Threat Feeds: {{ 'UPDATED' if 'SURICATA_UPDATE_SUCCESS' in update_feeds.stdout else 'READY' }}"

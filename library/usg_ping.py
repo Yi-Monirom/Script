@@ -16,7 +16,7 @@ _CANDIDATES = (
 DEFAULTS = {
     "usg_host": "192.168.71.100",
     "usg_user": "admin",
-    "usg_password": "M@n!r0m@123",
+    "usg_password": "",
     "timeout": 30,
 }
 

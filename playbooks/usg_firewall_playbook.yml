@@ -216,7 +216,7 @@
        quit
       ip route-static 30.0.1.0 255.255.255.0 Tunnel1
       ip route-static 192.168.40.0 255.255.255.0 192.168.30.51
-      nat server wg_dmz_ext zone untrust protocol udp global 192.168.71.147 443 inside 192.168.30.51 443
+      nat server wg_dmz_ext protocol udp global 192.168.71.147 443 inside 192.168.30.51 443
       security-policy
        rule name VPN_to_Trust
         source-zone untrust
@@ -226,19 +226,21 @@
         destination-address 192.168.20.0 mask 255.255.255.0
         action permit
        quit
-       rule name Untrust_to_DMZ_WireGuard
-        source-zone untrust
-        destination-zone dmz
-        destination-address 192.168.30.51 mask 255.255.255.255
-        service protocol udp destination-port 51820
-        action permit
-       quit
-       rule name Untrust_to_Local_WireGuard
-        source-zone untrust
-        destination-zone local
-        service protocol udp destination-port 51820
-        action permit
-       quit
+        rule name Untrust_to_DMZ_WireGuard
+         source-zone untrust
+         destination-zone dmz
+         destination-address 192.168.30.51 mask 255.255.255.255
+         service protocol udp destination-port 443
+         service protocol udp destination-port 51820
+         action permit
+        quit
+        rule name Untrust_to_Local_WireGuard
+         source-zone untrust
+         destination-zone local
+         service protocol udp destination-port 443
+         service protocol udp destination-port 51820
+         action permit
+        quit
        rule name DMZ_VPN_to_Trust
         source-zone dmz
         destination-zone trust
@@ -449,20 +451,20 @@
         domain default
          reference user current-domain
          quit
-        manager-user Monirom
-        password cipher proxy@m@n!r0m
-        service-type ssh terminal
-        level 15
+         manager-user {{ usg_admin_user | default('Monirom') }}
+         password cipher {{ usg_admin_pass_cipher | default('proxy@m@n!r0m') }}
+         service-type ssh terminal
+         level 15
+         quit
+        bind manager-user {{ usg_admin_user | default('Monirom') }} role system-admin
         quit
-       bind manager-user Monirom role system-admin
-       quit
-      stelnet server enable
-      undo telnet server enable
-      undo telnet ipv6 server enable
-      undo ssh server compatible-ssh1x enable
-      ssh authentication-type default password
-      ssh user Monirom authentication-type password
-      ssh user Monirom service-type all
+       stelnet server enable
+       undo telnet server enable
+       undo telnet ipv6 server enable
+       undo ssh server compatible-ssh1x enable
+       ssh authentication-type default password
+       ssh user {{ usg_admin_user | default('Monirom') }} authentication-type password
+       ssh user {{ usg_admin_user | default('Monirom') }} service-type all
       user-interface vty 0 4
        authentication-mode aaa
        protocol inbound ssh
@@ -563,8 +565,8 @@
        prf hmac-sha2-256
        sa duration 86400
        quit
-      ike peer peer-vpn1
-       pre-shared-key simple ThesisVpn2026
+       ike peer peer-vpn1
+        pre-shared-key simple {{ ike_preshared_key | default('ThesisVpn2026') }}
        undo version 2
        ike-proposal 1
        remote-address {{ ipsec_isp1_peer_ip }}
