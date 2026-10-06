@@ -1,0 +1,6 @@
+---
+# Shared variables and credentials for DMZ hosts (ids-server 192.168.30.50 & wg-server 192.168.30.51).
+# All DMZ connections automatically route via ProxyJump through Relay VM (192.168.71.149).
+ansible_ssh_common_args: '-o ProxyJump=root@192.168.71.149 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+dmz_password: " "
+ansible_password: " "
