@@ -10,7 +10,7 @@
 #           4. EveBox Web UI Dashboard Management (http://192.168.30.50:5636/)
 # ==============================================================================
 - name: Master Unified IDS/IPS Provisioning & Rule Management
-  hosts: dmz
+  hosts: ids-server
   gather_facts: no
 
   vars:

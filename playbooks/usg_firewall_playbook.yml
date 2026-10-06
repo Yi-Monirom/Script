@@ -449,12 +449,16 @@
       update schedule av-sdb daily 02:30
       update url-remote-query enable
       interface GigabitEthernet0/0/0
-       service-manage enable
-       service-manage ssh permit
-       service-manage ping permit
-       service-manage https permit
-       undo shutdown
-       quit
+        undo shutdown
+        ip address 192.168.71.100 255.255.255.0
+        ip address 192.168.71.147 255.255.255.0 sub
+        service-manage enable
+        service-manage http permit
+        service-manage https permit
+        service-manage ping permit
+        service-manage ssh permit
+        firewall defend ipcar destination session-rate-limit enable
+        quit
       aaa
         domain default
          reference user current-domain
